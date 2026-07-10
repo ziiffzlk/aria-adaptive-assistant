@@ -1,0 +1,863 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,500;1,9..144,300;1,9..144,400&family=Spectral:ital,wght@0,300;0,400;1,300;1,400&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; height: 100%; background: #f3ebdc; overflow: hidden; }
+  *, *::before, *::after { box-sizing: border-box; }
+  @keyframes ariaPulse { 0%, 100% { opacity: .3; transform: scale(1); } 50% { opacity: .65; transform: scale(1.3); } }
+  ::placeholder { color: rgba(110,88,70,0.38); font-style: italic; }
+  ::-webkit-scrollbar { width: 0; height: 0; }
+</style>
+</head>
+<body>
+
+<!-- Memory overlay -->
+<div id="memory-overlay" style="position: fixed; inset: 0; z-index: 20; display: none; align-items: center; justify-content: center; background: rgba(243,235,220,0.88); -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);">
+  <div style="max-width: 540px; width: 90%; max-height: 84vh; overflow-y: auto; padding: 42px 40px 36px; background: rgba(248,242,229,0.96); border: 1px solid rgba(120,90,60,0.16); border-radius: 22px; box-shadow: 0 32px 80px -24px rgba(80,52,32,0.36), 0 2px 12px -4px rgba(80,52,32,0.14); font-family: 'Spectral', serif; color: #4a3526;">
+    <div style="font-size: 11px; letter-spacing: 0.42em; text-transform: uppercase; color: rgba(74,52,38,0.5); margin-bottom: 24px;">Memory</div>
+    <div id="memory-content" style="font-size: 15.5px; line-height: 1.72; white-space: pre-wrap; color: rgba(60,42,30,0.85);"></div>
+    <div id="memory-tasks" style="margin-top: 18px;"></div>
+    <button id="memory-close" style="margin-top: 30px; border: 1px solid rgba(110,80,55,0.3); background: none; padding: 9px 28px; border-radius: 999px; font-family: 'Spectral', serif; font-size: 14px; color: rgba(74,52,38,0.7); cursor: pointer; transition: background 0.4s ease;">Close</button>
+  </div>
+</div>
+
+<div id="root" style="position: fixed; inset: 0; background: #f3ebdc; overflow: hidden; font-family: 'Spectral', Georgia, serif; cursor: default; -webkit-font-smoothing: antialiased;">
+
+  <canvas id="canvas" style="position: absolute; inset: 0; width: 100%; height: 100%; display: block;"></canvas>
+
+  <div id="aria-layer" style="position: absolute; inset: 0; pointer-events: none; z-index: 3;"></div>
+  <div id="user-layer" style="position: absolute; inset: 0; pointer-events: none; z-index: 2;"></div>
+
+  <div style="position: absolute; top: 38px; left: 44px; z-index: 5; font-family: 'Spectral', serif; font-size: 11px; letter-spacing: 0.46em; text-transform: uppercase; color: rgba(78,56,40,0.5); user-select: none;">ARIA</div>
+
+  <div id="status" style="position: absolute; bottom: 40px; left: 46px; z-index: 5; display: flex; align-items: center; gap: 9px; opacity: 0; transition: opacity 1.4s ease; user-select: none;">
+    <span style="width: 5px; height: 5px; border-radius: 50%; background: #b87a54; display: block; animation: ariaPulse 3.6s ease-in-out infinite;"></span>
+    <span data-status-word="" style="font-family: 'Spectral', serif; font-style: italic; font-size: 12.5px; letter-spacing: 0.02em; color: rgba(92,68,50,0.5);">listening</span>
+  </div>
+
+  <button id="learned-btn" style="position: absolute; bottom: 38px; right: 44px; z-index: 5; border: none; background: none; padding: 4px 2px; cursor: pointer; font-family: 'Spectral', serif; font-style: italic; font-size: 12.5px; letter-spacing: 0.02em; color: rgba(92,68,50,0.45); transition: color 0.6s ease;">what I’ve learned →</button>
+
+  <div id="interrupt-cue" style="position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%); z-index: 5; opacity: 0; pointer-events: none; font-family: 'Spectral', serif; font-style: italic; font-size: 12.5px; letter-spacing: 0.14em; color: rgba(181,103,74,0.8);">— go ahead, I’m listening —</div>
+
+  <div id="mic-warning" style="position: absolute; bottom: 66px; left: 46px; z-index: 5; display: flex; align-items: center; gap: 9px; opacity: 0; pointer-events: none; transition: opacity 1s ease;">
+    <span style="width: 5px; height: 5px; border-radius: 50%; background: #b5674a; display: block; animation: ariaPulse 1.6s ease-in-out infinite;"></span>
+    <span style="font-family: 'Spectral', serif; font-style: italic; font-size: 12.5px; letter-spacing: 0.02em; color: rgba(181,103,74,0.9);">I can’t hear you — my microphone has gone silent. Check Windows sound input.</span>
+  </div>
+
+  <button id="settings-btn" aria-label="Settings" style="position: absolute; top: 34px; right: 40px; z-index: 6; width: 30px; height: 30px; border: none; background: none; padding: 0; cursor: pointer; display: flex; align-items: center; justify-content: center; opacity: 0.34; transition: opacity 0.8s ease;">
+    <span style="width: 15px; height: 15px; border-radius: 50%; border: 1px solid rgba(74,52,38,0.85); display: block;"></span>
+    <span style="position: absolute; width: 3px; height: 3px; border-radius: 50%; background: rgba(74,52,38,0.9);"></span>
+  </button>
+
+  <div id="panel" style="position: absolute; top: 76px; right: 40px; z-index: 7; width: 304px; padding: 26px 24px 22px; border-radius: 18px; background: rgba(247,240,227,0.82); -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px); border: 1px solid rgba(120,90,60,0.16); box-shadow: 0 26px 60px -28px rgba(80,52,32,0.42), 0 2px 10px -4px rgba(80,52,32,0.18); color: #4a3526; opacity: 0; transform: translateY(-8px) scale(0.985); transform-origin: top right; pointer-events: none; transition: opacity 0.7s cubic-bezier(.2,.7,.2,1), transform 0.7s cubic-bezier(.2,.7,.2,1);">
+
+    <div style="font-family: 'Spectral', serif; font-size: 10.5px; letter-spacing: 0.4em; text-transform: uppercase; color: rgba(74,52,38,0.5); margin-bottom: 20px;">Presence</div>
+
+    <div style="display: flex; align-items: center; justify-content: space-between; padding: 9px 0;">
+      <span style="font-family: 'Spectral', serif; font-size: 15px; color: rgba(60,42,30,0.92);">Wake word</span>
+      <span data-toggle="wake" data-on="0" style="position: relative; width: 42px; height: 24px; border-radius: 999px; background: rgba(120,90,60,0.18); cursor: pointer; transition: background 0.5s ease;">
+        <span style="position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fbf5e9; box-shadow: 0 1px 3px rgba(80,52,32,0.3); transition: left 0.42s cubic-bezier(.2,.8,.2,1);"></span>
+      </span>
+    </div>
+    <div style="font-family: 'Spectral', serif; font-style: italic; font-size: 12px; color: rgba(110,84,62,0.6); margin: -2px 0 10px;">off: I answer any speech · on: say “Aria” first</div>
+
+    <div style="display: flex; align-items: center; justify-content: space-between; padding: 9px 0; border-top: 1px solid rgba(120,90,60,0.12);">
+      <span style="font-family: 'Spectral', serif; font-size: 15px; color: rgba(60,42,30,0.92);">Camera awareness</span>
+      <span data-toggle="cam" data-on="1" style="position: relative; width: 42px; height: 24px; border-radius: 999px; background: rgba(187,115,85,0.55); cursor: pointer; transition: background 0.5s ease;">
+        <span style="position: absolute; top: 3px; left: 21px; width: 18px; height: 18px; border-radius: 50%; background: #fbf5e9; box-shadow: 0 1px 3px rgba(80,52,32,0.3); transition: left 0.42s cubic-bezier(.2,.8,.2,1);"></span>
+      </span>
+    </div>
+
+    <div style="font-family: 'Spectral', serif; font-size: 10.5px; letter-spacing: 0.4em; text-transform: uppercase; color: rgba(74,52,38,0.5); margin: 18px 0 11px;">Temperament</div>
+    <div style="display: flex; gap: 6px;">
+      <button data-mode="calm" style="flex: 1; padding: 9px 4px; border: 1px solid rgba(120,90,60,0.16); border-radius: 11px; background: rgba(187,115,85,0.16); font-family: 'Spectral', serif; font-size: 12.5px; color: rgba(60,42,30,0.9); cursor: pointer; transition: background 0.5s ease, border-color 0.5s ease;">Calm</button>
+      <button data-mode="tender" style="flex: 1; padding: 9px 4px; border: 1px solid rgba(120,90,60,0.16); border-radius: 11px; background: transparent; font-family: 'Spectral', serif; font-size: 12.5px; color: rgba(60,42,30,0.7); cursor: pointer; transition: background 0.5s ease, border-color 0.5s ease;">Warm</button>
+      <button data-mode="thoughtful" style="flex: 1; padding: 9px 4px; border: 1px solid rgba(120,90,60,0.16); border-radius: 11px; background: transparent; font-family: 'Spectral', serif; font-size: 12.5px; color: rgba(60,42,30,0.7); cursor: pointer; transition: background 0.5s ease, border-color 0.5s ease;">Pensive</button>
+    </div>
+
+    <div data-memory="" style="display: flex; align-items: center; justify-content: space-between; padding: 14px 0 4px; margin-top: 16px; border-top: 1px solid rgba(120,90,60,0.12); cursor: pointer; transition: opacity 0.3s ease;">
+      <span style="font-family: 'Spectral', serif; font-size: 15px; color: rgba(60,42,30,0.92);">Memory</span>
+      <span style="font-family: 'Spectral', serif; font-size: 16px; color: rgba(110,84,62,0.55);">→</span>
+    </div>
+  </div>
+
+  <div id="input-wrap" style="position: absolute; left: 50%; bottom: 6.5vh; transform: translateX(-50%) translateY(14px); z-index: 5; width: min(560px, 74vw); opacity: 0; transition: opacity 0.9s ease, transform 0.9s cubic-bezier(.2,.7,.2,1);">
+    <div style="display: flex; align-items: center; gap: 14px; border-bottom: 1px solid rgba(110,80,55,0.28); padding-bottom: 9px;">
+      <input id="input" type="text" placeholder="say something to the quiet…" style="flex: 1; border: none; outline: none; background: none; font-family: 'Spectral', serif; font-style: italic; font-size: 19px; color: #4a3526; padding: 6px 0;">
+      <button id="send-btn" aria-label="Send" style="width: 30px; height: 30px; flex: none; border-radius: 50%; border: 1px solid rgba(110,80,55,0.4); background: none; cursor: pointer; display: flex; align-items: center; justify-content: center; color: rgba(90,62,42,0.75); font-family: serif; font-size: 15px; transition: background 0.5s ease, color 0.5s ease;">→</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+
+  // ── state ────────────────────────────────────────────────────────────
+  let timers = [], ariaIdx = 0, lean = 0, _panelOpen = false, _ripple = null;
+  let noise3, cur, target, moods, blobs, grain, ctx, octx, oc, W, H;
+  let grainPattern, vignette, _raf, _gf = 0;
+  let _busy = false; // true while awaiting a /send response
+  let _micLevel = 0, _micActive = false, _micTarget = null, _activeMood = 'calm';
+  let _ariaSpeaking = false; // true only while audio is physically playing (from /mic_level)
+  const _MOOD_LISTENING = { base:[238,230,210], cols:[[160,190,130],[220,178,78],[120,180,145],[200,158,88],[145,195,150]], speed:1.55, amp:0.58, breath:0.88 };
+  const _MOOD_INACTIVE  = { base:[232,226,216], cols:[[168,160,148],[172,164,150],[166,158,144],[170,162,148],[167,160,146]], speed:0.14, amp:0.08, breath:0.10 };
+
+  // ── elements ─────────────────────────────────────────────────────────
+  const rootEl        = document.getElementById('root');
+  const canvasEl      = document.getElementById('canvas');
+  const ariaEl        = document.getElementById('aria-layer');
+  const userEl        = document.getElementById('user-layer');
+  const statusEl      = document.getElementById('status');
+  const settingsBtnEl = document.getElementById('settings-btn');
+  const panelEl       = document.getElementById('panel');
+  const inputWrapEl   = document.getElementById('input-wrap');
+  const inputEl       = document.getElementById('input');
+  const sendBtnEl     = document.getElementById('send-btn');
+
+  // ── timer helpers ─────────────────────────────────────────────────────
+  function schedule(fn, ms) { const id = setTimeout(fn, ms); timers.push(id); return id; }
+  function clearTimers() { timers.forEach(clearTimeout); timers = []; }
+
+  // ── simplex noise (3D) ────────────────────────────────────────────────
+  function makeNoise() {
+    const grad3 = [[1,1,0],[-1,1,0],[1,-1,0],[-1,-1,0],[1,0,1],[-1,0,1],[1,0,-1],[-1,0,-1],[0,1,1],[0,-1,1],[0,1,-1],[0,-1,-1]];
+    let s = 1337;
+    const rnd = () => { s = (s * 1664525 + 1013904223) & 0xffffffff; return ((s >>> 0) / 4294967296); };
+    const p = new Uint8Array(256);
+    for (let i = 0; i < 256; i++) p[i] = i;
+    for (let i = 255; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); const t = p[i]; p[i] = p[j]; p[j] = t; }
+    const perm = new Uint8Array(512), permMod12 = new Uint8Array(512);
+    for (let i = 0; i < 512; i++) { perm[i] = p[i & 255]; permMod12[i] = perm[i] % 12; }
+    const F3 = 1 / 3, G3 = 1 / 6;
+    noise3 = (xin, yin, zin) => {
+      let n0, n1, n2, n3;
+      const s2 = (xin + yin + zin) * F3;
+      const i = Math.floor(xin + s2), j = Math.floor(yin + s2), k = Math.floor(zin + s2);
+      const t = (i + j + k) * G3;
+      const X0 = i - t, Y0 = j - t, Z0 = k - t;
+      const x0 = xin - X0, y0 = yin - Y0, z0 = zin - Z0;
+      let i1, j1, k1, i2, j2, k2;
+      if (x0 >= y0) {
+        if (y0 >= z0) { i1=1;j1=0;k1=0;i2=1;j2=1;k2=0; }
+        else if (x0 >= z0) { i1=1;j1=0;k1=0;i2=1;j2=0;k2=1; }
+        else { i1=0;j1=0;k1=1;i2=1;j2=0;k2=1; }
+      } else {
+        if (y0 < z0) { i1=0;j1=0;k1=1;i2=0;j2=1;k2=1; }
+        else if (x0 < z0) { i1=0;j1=1;k1=0;i2=0;j2=1;k2=1; }
+        else { i1=0;j1=1;k1=0;i2=1;j2=1;k2=0; }
+      }
+      const x1=x0-i1+G3, y1=y0-j1+G3, z1=z0-k1+G3;
+      const x2=x0-i2+2*G3, y2=y0-j2+2*G3, z2=z0-k2+2*G3;
+      const x3=x0-1+3*G3, y3=y0-1+3*G3, z3=z0-1+3*G3;
+      const ii=i&255, jj=j&255, kk=k&255;
+      let t0=0.6-x0*x0-y0*y0-z0*z0;
+      if (t0<0) n0=0; else { const gi0=permMod12[ii+perm[jj+perm[kk]]]*1; t0*=t0; const g=grad3[gi0]; n0=t0*t0*(g[0]*x0+g[1]*y0+g[2]*z0); }
+      let t1=0.6-x1*x1-y1*y1-z1*z1;
+      if (t1<0) n1=0; else { const gi1=permMod12[ii+i1+perm[jj+j1+perm[kk+k1]]]; t1*=t1; const g=grad3[gi1]; n1=t1*t1*(g[0]*x1+g[1]*y1+g[2]*z1); }
+      let t2=0.6-x2*x2-y2*y2-z2*z2;
+      if (t2<0) n2=0; else { const gi2=permMod12[ii+i2+perm[jj+j2+perm[kk+k2]]]; t2*=t2; const g=grad3[gi2]; n2=t2*t2*(g[0]*x2+g[1]*y2+g[2]*z2); }
+      let t3=0.6-x3*x3-y3*y3-z3*z3;
+      if (t3<0) n3=0; else { const gi3=permMod12[ii+1+perm[jj+1+perm[kk+1]]]; t3*=t3; const g=grad3[gi3]; n3=t3*t3*(g[0]*x3+g[1]*y3+g[2]*z3); }
+      return 32 * (n0+n1+n2+n3);
+    };
+  }
+
+  // ── moods ─────────────────────────────────────────────────────────────
+  function setupMoods() {
+    moods = {
+      calm:       { base:[241,233,216], cols:[[150,174,120],[224,180,86],[200,196,150],[188,166,108],[212,156,112]], speed:0.62, amp:0.42, breath:0.5 },
+      happy:      { base:[245,235,216], cols:[[236,178,76],[238,162,110],[222,124,86],[244,200,124],[228,144,98]], speed:1.08, amp:0.46, breath:0.72 },
+      thoughtful: { base:[233,220,196], cols:[[190,138,56],[170,104,64],[174,84,52],[150,124,80],[196,150,86]], speed:0.46, amp:0.36, breath:0.4 },
+      tender:     { base:[243,230,219], cols:[[212,138,128],[222,180,128],[228,156,146],[202,178,140],[222,152,134]], speed:0.58, amp:0.42, breath:0.56 },
+    };
+    const c = moods.calm;
+    cur = { base: c.base.slice(), cols: c.cols.map(x => x.slice()), speed: c.speed, amp: c.amp, breath: c.breath };
+    target = moods.calm;
+  }
+
+  function setMood(name) {
+    if (moods[name]) { target = moods[name]; _activeMood = name; }
+  }
+
+  // ── canvas ────────────────────────────────────────────────────────────
+  function setupCanvas() {
+    ctx = canvasEl.getContext('2d');
+    oc = document.createElement('canvas');
+    octx = oc.getContext('2d');
+    const homes = [
+      [0.16, 0.30], [0.78, 0.22], [0.50, 0.62], [0.20, 0.80],
+      [0.86, 0.74], [0.42, 0.18], [0.66, 0.50], [0.08, 0.56], [0.92, 0.44],
+    ];
+    blobs = homes.map((h, i) => ({
+      ci: i % 5, hx: h[0], hy: h[1],
+      sx: Math.random()*100, sy: Math.random()*100,
+      r: 0.42 + Math.random()*0.4, ph: Math.random()*Math.PI*2,
+    }));
+    makeGrain();
+    resize();
+    window.addEventListener('resize', resize);
+  }
+
+  function makeGrain() {
+    const g = document.createElement('canvas');
+    g.width = g.height = 180;
+    const gx = g.getContext('2d');
+    const img = gx.createImageData(180, 180);
+    for (let i = 0; i < img.data.length; i += 4) {
+      const v = 120 + Math.random() * 135;
+      img.data[i] = img.data[i+1] = img.data[i+2] = v;
+      img.data[i+3] = 255;
+    }
+    gx.putImageData(img, 0, 0);
+    grain = g;
+  }
+
+  function resize() {
+    const w = rootEl.clientWidth, h = rootEl.clientHeight;
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    W = w; H = h;
+    canvasEl.width = Math.round(w * dpr); canvasEl.height = Math.round(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    const scale = Math.min(0.32, 520 / Math.max(w, h));
+    oc.width = Math.max(2, Math.round(w * scale));
+    oc.height = Math.max(2, Math.round(h * scale));
+    grainPattern = ctx.createPattern(grain, 'repeat');
+    const vg = ctx.createRadialGradient(w/2, h*0.46, Math.min(w,h)*0.18, w/2, h*0.5, Math.max(w,h)*0.78);
+    vg.addColorStop(0, 'rgba(70,46,30,0)');
+    vg.addColorStop(0.7, 'rgba(70,46,30,0.04)');
+    vg.addColorStop(1, 'rgba(58,38,24,0.20)');
+    vignette = vg;
+  }
+
+  function startLoop() {
+    const step = (now) => { _raf = requestAnimationFrame(step); frame(now * 0.001); };
+    _raf = requestAnimationFrame(step);
+  }
+
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  function frame(t) {
+    const k = 0.012;
+    const eff = _micTarget || target;
+    for (let i = 0; i < 3; i++) cur.base[i] = lerp(cur.base[i], eff.base[i], k);
+    for (let c = 0; c < cur.cols.length; c++)
+      for (let i = 0; i < 3; i++) cur.cols[c][i] = lerp(cur.cols[c][i], eff.cols[c][i], k);
+    cur.speed = lerp(cur.speed, eff.speed, k);
+    cur.amp   = lerp(cur.amp, eff.amp, k);
+    cur.breath= lerp(cur.breath, eff.breath, k);
+
+    const ow = oc.width, oh = oc.height;
+    const tt = t * cur.speed;
+    const breathOsc = Math.sin(t * 0.32) * cur.breath;
+    const leanVal = lean || 0;
+
+    octx.globalCompositeOperation = 'source-over';
+    octx.fillStyle = `rgb(${cur.base[0]|0},${cur.base[1]|0},${cur.base[2]|0})`;
+    octx.fillRect(0, 0, ow, oh);
+
+    const glow = octx.createRadialGradient(ow*0.5, oh*0.14, 0, ow*0.5, oh*0.14, oh*0.9);
+    glow.addColorStop(0, `rgba(${Math.min(255,cur.base[0]+9)|0},${Math.min(255,cur.base[1]+7)|0},${(cur.base[2]-4)|0},0.28)`);
+    glow.addColorStop(1, 'rgba(255,255,255,0)');
+    octx.fillStyle = glow; octx.fillRect(0, 0, ow, oh);
+
+    for (let bi = 0; bi < blobs.length; bi++) {
+      const b = blobs[bi];
+      const nx = noise3(b.sx + tt * 0.05, b.sy, tt * 0.035);
+      const ny = noise3(b.sy + 50, b.sx + tt * 0.05, tt * 0.035 + 10);
+      const nr = noise3(b.sx * 0.5, b.sy * 0.5, tt * 0.06 + 30);
+      const wander = cur.amp * 0.5;
+      const x = (b.hx + nx * wander) * ow;
+      const y = (b.hy + ny * wander + leanVal * 0.12) * oh;
+      const r = (0.16 + b.r * 0.18 + nr * 0.04 + breathOsc * 0.035) * Math.max(ow, oh);
+      const col = cur.cols[b.ci];
+      const a = 0.60 + 0.15 * Math.sin(t * 0.5 + b.ph);
+      const grd = octx.createRadialGradient(x, y, 0, x, y, r);
+      grd.addColorStop(0, `rgba(${col[0]|0},${col[1]|0},${col[2]|0},${a})`);
+      grd.addColorStop(0.38, `rgba(${col[0]|0},${col[1]|0},${col[2]|0},${a*0.68})`);
+      grd.addColorStop(0.72, `rgba(${col[0]|0},${col[1]|0},${col[2]|0},${a*0.26})`);
+      grd.addColorStop(1, `rgba(${col[0]|0},${col[1]|0},${col[2]|0},0)`);
+      octx.fillStyle = grd;
+      octx.beginPath(); octx.arc(x, y, r, 0, Math.PI*2); octx.fill();
+    }
+
+    if (_ripple) {
+      const age = (t - _ripple) * cur.speed;
+      if (age > 4.5) { _ripple = null; }
+      else {
+        const rr = age * Math.max(ow, oh) * 0.34;
+        const fade = Math.max(0, 1 - age / 4.5);
+        const rg = octx.createRadialGradient(ow*0.5, oh*0.55, rr*0.3, ow*0.5, oh*0.55, rr + 1);
+        rg.addColorStop(0, 'rgba(255,238,210,0)');
+        rg.addColorStop(0.82, `rgba(248,222,184,${0.16*fade})`);
+        rg.addColorStop(1, 'rgba(248,222,184,0)');
+        octx.fillStyle = rg; octx.fillRect(0, 0, ow, oh);
+      }
+    }
+
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(oc, 0, 0, ow, oh, 0, 0, W, H);
+    ctx.fillStyle = vignette; ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    ctx.globalAlpha = 0.05;
+    ctx.globalCompositeOperation = 'overlay';
+    const jx = (_gf = (_gf||0)+1) % 2 === 0 ? Math.random()*4 : Math.random()*4;
+    ctx.translate(-jx, -Math.random()*4);
+    ctx.fillStyle = grainPattern;
+    ctx.fillRect(0, 0, W + 8, H + 8);
+    ctx.restore();
+  }
+
+  function ripple() { _ripple = (performance.now() * 0.001); }
+
+  // ── word reveal ───────────────────────────────────────────────────────
+  function anchors() {
+    return [
+      { left: '11vw', top: '34vh', maxWidth: '32vw', textAlign: 'left' },
+      { left: '50vw', top: '40vh', transform: 'translateX(-50%)', maxWidth: '36vw', textAlign: 'center' },
+      { right: '11vw', top: '30vh', maxWidth: '30vw', textAlign: 'right' },
+      { left: '13vw', top: '50vh', maxWidth: '34vw', textAlign: 'left' },
+    ];
+  }
+
+  // Estimate front-end speech duration as a fallback when backend value is absent.
+  function estimateSpeechDuration(text, mood) {
+    const words = Math.max(1, text.split(' ').length);
+    // Matches voice.py KOKORO_SPEED_MAP (backend is authoritative; this is
+    // only the fallback when estimated_duration_ms is absent).
+    const speedMap = {
+      excited: 1.05, happy: 1.0, engaged: 1.0, surprised: 1.02,
+      'calm confident': 0.95, distracted: 0.95, calm: 0.92,
+      frustrated: 0.88, sad: 0.88, anxious: 0.87, stressed: 0.85, tired: 0.85,
+    };
+    const speed = speedMap[(mood || '').toLowerCase()] || 0.92;
+    return (words / (2.5 * speed)) * 1000;
+  }
+
+  function showLine(container, text, opts) {
+    const old = container._cur;
+    if (old) {
+      old.style.opacity = '0';
+      old.style.filter = 'blur(11px)';
+      old.style.transform = (old._baseTransform || '') + ' translateY(-6px)';
+      const o = old; schedule(() => o.remove(), 1700);
+    }
+    const block = document.createElement('div');
+    block.style.position = 'absolute';
+    if (opts.left)   block.style.left = opts.left;
+    if (opts.right)  block.style.right = opts.right;
+    if (opts.bottom) block.style.bottom = opts.bottom;
+    else             block.style.top = opts.top;
+    block.style.maxWidth    = opts.maxWidth;
+    block.style.textAlign   = opts.textAlign || 'left';
+    block.style.fontFamily  = opts.font;
+    block.style.fontSize    = opts.size;
+    block.style.fontStyle   = opts.italic ? 'italic' : 'normal';
+    block.style.fontWeight  = opts.weight || '400';
+    block.style.lineHeight  = opts.lh || '1.14';
+    block.style.color       = opts.color;
+    block.style.letterSpacing = opts.ls || '-0.005em';
+    block._baseTransform    = opts.transform || '';
+    block.style.transform   = block._baseTransform;
+    block.style.transition  = 'opacity 1.6s ease, filter 1.6s ease';
+
+    const words = text.split(' ');
+    // Dynamic stagger: spread reveals evenly across the speech duration so
+    // the last word appears just before speaking ends rather than all at once.
+    let stagger = opts.stagger || 150;
+    if (opts.durationMs) {
+      const usable = Math.max(opts.durationMs - 840, words.length * 80);
+      stagger = Math.max(80, Math.min(550, usable / Math.max(words.length - 1, 1)));
+    }
+    words.forEach((w, i) => {
+      const sp = document.createElement('span');
+      sp.textContent = w + ' ';
+      sp.style.display = 'inline-block';
+      sp.style.opacity = '0';
+      sp.style.filter = 'blur(6px)';
+      sp.style.transform = 'translateY(9px)';
+      sp.style.transition = 'opacity 1.4s cubic-bezier(.2,.6,.2,1), filter 1.5s cubic-bezier(.2,.6,.2,1), transform 1.5s cubic-bezier(.2,.6,.2,1)';
+      block.appendChild(sp);
+      schedule(() => {
+        sp.style.opacity = String(opts.alpha);
+        sp.style.filter = 'blur(0px)';
+        sp.style.transform = 'translateY(0)';
+      }, 240 + i * stagger);
+    });
+    container.appendChild(block);
+    container._cur = block;
+    return block;
+  }
+
+  function fadeOut(container, delay) {
+    schedule(() => {
+      const b = container._cur;
+      if (b) {
+        b.style.opacity = '0'; b.style.filter = 'blur(11px)';
+        const x = b;
+        schedule(() => { if (container._cur === x) { x.remove(); container._cur = null; } }, 1700);
+      }
+    }, delay);
+  }
+
+  function showARIA(text, ai, durationMs) {
+    const a = anchors()[ai % 4];
+    lean = 0;
+    ripple();
+    setStatus('speaking');
+    return showLine(ariaEl, text, Object.assign({}, a, {
+      font: "'Fraunces', Georgia, serif",
+      size: 'clamp(20px, 2.4vw, 34px)',
+      weight: '400', lh: '1.12', ls: '-0.012em',
+      color: 'rgba(56,38,26,0.93)', alpha: 0.93,
+      durationMs: durationMs || null,
+    }));
+  }
+
+  function showUser(text) {
+    lean = 1;
+    setStatus('listening');
+    const b = showLine(userEl, text, {
+      left: '50%', bottom: 'calc(6.5vh + 58px)', transform: 'translateX(-50%)',
+      maxWidth: 'min(560px, 74vw)', textAlign: 'center',
+      font: "'Spectral', serif", size: 'clamp(16px, 1.9vw, 23px)',
+      italic: true, weight: '300', lh: '1.35', ls: '0.01em',
+      color: 'rgba(112,86,66,0.78)', alpha: 0.78, stagger: 95,
+    });
+    fadeOut(userEl, 4200);
+    return b;
+  }
+
+  function setStatus(word) {
+    if (!statusEl) return;
+    statusEl.style.opacity = '1';
+    const span = statusEl.querySelector('[data-status-word]');
+    if (span && span.textContent !== word) {
+      span.style.transition = 'opacity 0.5s ease';
+      span.style.opacity = '0';
+      schedule(() => { span.textContent = word; span.style.opacity = '1'; }, 500);
+    }
+  }
+
+  // ── mood mapping ──────────────────────────────────────────────────────
+  function toVisualMood(mood) {
+    const m = (mood || '').toLowerCase();
+    if (['stressed','anxious','frustrated','fearful','fear','angry','disgust'].includes(m)) return 'thoughtful';
+    if (['sad','tired'].includes(m)) return 'tender';
+    if (['happy','excited','grateful','surprised'].includes(m)) return 'happy';
+    return 'calm';
+  }
+
+  // Caption/audio sync: hold the caption until the backend reports audio is
+  // PHYSICALLY playing (TTS generation can take many seconds on a contended
+  // GPU — captions used to lead the voice by that entire gap). If we catch
+  // the tail of a PREVIOUS utterance still playing, wait for it to end and
+  // the new one to begin. Fallback: show anyway after timeoutMs.
+  function whenSpeechStarts(cb, timeoutMs) {
+    const t0 = performance.now();
+    const wasSpeaking = _ariaSpeaking;
+    let sawGap = !wasSpeaking;
+    (function check() {
+      if (performance.now() - t0 > (timeoutMs || 45000)) return cb();
+      if (!sawGap) { if (!_ariaSpeaking) sawGap = true; return setTimeout(check, 120); }
+      if (_ariaSpeaking) return cb();
+      setTimeout(check, 120);
+    })();
+  }
+
+  // Waits for playback to finish (speaking flag drops). Releasing the turn on
+  // an estimated duration made _busy overshoot on long replies — /poll stayed
+  // gated and voice commands were silently ignored ("it stops listening").
+  function whenSpeechEnds(cb, fallbackMs) {
+    const t0 = performance.now();
+    (function check() {
+      if (!_ariaSpeaking || performance.now() - t0 > fallbackMs) return cb();
+      setTimeout(check, 200);
+    })();
+  }
+
+  // ── real backend ──────────────────────────────────────────────────────
+  // Single send path shared by typed input and voice commands — the two used
+  // to carry duplicate copies of this logic that could drift apart.
+  async function sendToAria(text) {
+    _busy = true;
+    clearTimers();
+    showUser(text);
+    schedule(() => { setMood('thoughtful'); setStatus('thinking'); lean = 0.6; }, 700);
+    try {
+      // Abort a hung request rather than leaving _busy locked forever
+      // (a hung /send used to deadlock both text input and voice polling).
+      const ctrl = new AbortController();
+      const abortTimer = setTimeout(() => ctrl.abort(), 45000);
+      const resp = await fetch('/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text }),
+        signal: ctrl.signal,
+      });
+      clearTimeout(abortTimer);
+      const data = await resp.json();
+      const mood = data.mood || 'calm';
+      const durMs = data.estimated_duration_ms || estimateSpeechDuration(data.response, mood);
+      // Caption is gated on actual audio playback start, not response receipt;
+      // the turn is released when playback actually ENDS, not on an estimate.
+      whenSpeechStarts(() => {
+        setMood(toVisualMood(mood));
+        showARIA(data.response, ariaIdx++, durMs);
+        whenSpeechEnds(() => {
+          schedule(() => { setStatus('listening'); lean = 0; _busy = false; }, 500);
+        }, durMs + 15000);
+      });
+    } catch (e) {
+      console.error('[aria] /send failed', e);
+      showARIA('Something went quiet. Try again?', ariaIdx++, 2400);
+      schedule(() => { setStatus('listening'); lean = 0; _busy = false; }, 3200);
+    }
+  }
+
+  async function submit() {
+    if (_busy) return;
+    const text = (inputEl.value || '').trim();
+    if (!text) return;
+    inputEl.value = '';
+    await sendToAria(text);
+  }
+
+  async function pollVoice() {
+    if (!_busy) {
+      try {
+        const resp = await fetch('/poll');
+        const data = await resp.json();
+        if (data.text) await sendToAria(data.text);
+      } catch (e) { /* poll errors are normal during startup */ }
+    }
+    // 600ms: the old 2000ms poll added up to 2s between "ARIA heard you"
+    // and the UI showing it — a real chunk of Issue 2's perceived delay.
+    setTimeout(pollVoice, 600);
+  }
+
+  async function pollFaceMood() {
+    try {
+      const resp = await fetch('/face_mood');
+      const data = await resp.json();
+      const sw = statusEl.querySelector('[data-status-word]');
+      const currentWord = sw ? sw.textContent : 'listening';
+      if (data.face_detected && data.visual_mood && currentWord === 'listening' && !_busy) {
+        setMood(data.visual_mood);
+      }
+    } catch (e) {}
+    setTimeout(pollFaceMood, 5000);
+  }
+
+  async function pollMicLevel() {
+    try {
+      const data = await fetch('/mic_level').then(r => r.json());
+      const wasSpeakingBefore = _ariaSpeaking;
+      _ariaSpeaking = !!data.speaking;
+      _micActive = data.active;
+
+      // BARGE-IN reaction: playback stopped while a response was still being
+      // shown AND the backend is already back to LISTENING (a natural end
+      // passes through the same flags but whenSpeechEnds handles that; an
+      // interruption is distinguished by the caption still mid-reveal well
+      // before its estimated duration). Kill remaining caption reveals,
+      // snap the presence to listening, and flash the interrupted cue.
+      if (wasSpeakingBefore && !_ariaSpeaking && data.state === 'LISTENING' && _busy) {
+        clearTimers();               // stops all pending word reveals instantly
+        _busy = false;
+        setStatus('listening');
+        lean = 0;
+        const cue = document.getElementById('interrupt-cue');
+        if (cue) {
+          cue.style.transition = 'none'; cue.style.opacity = '1';
+          requestAnimationFrame(() => {
+            cue.style.transition = 'opacity 2.2s ease';
+            cue.style.opacity = '0';
+          });
+        }
+      }
+
+      // Dead-mic notice: the backend flags 10s+ of pure silence from the
+      // input device (muted, or default switched to a Bluetooth headset).
+      const warnEl = document.getElementById('mic-warning');
+      if (warnEl) warnEl.style.opacity = data.silent ? '1' : '0';
+      // The backend reports RMS once per captured phrase and holds it, so
+      // decay client-side — otherwise the "listening" visual lingers for the
+      // whole next capture cycle and fights the mood palette mid-response.
+      _micLevel = Math.max((data.level || 0), _micLevel * 0.72);
+
+      // The mic visual only ever overrides while ARIA is idle-listening;
+      // during thinking/speaking the mood palette always wins.
+      const sw = statusEl.querySelector('[data-status-word]');
+      const idle = !_busy && (!sw || sw.textContent === 'listening');
+      if (!idle) {
+        _micTarget = null;
+      } else if (!_micActive || data.silent) {
+        _micTarget = _MOOD_INACTIVE;   // mic dead or thread not running → still, muted presence
+      } else if (_micLevel > 0.05) {
+        const s = 0.6 + _micLevel * 0.4;
+        _micTarget = { base: _MOOD_LISTENING.base, cols: _MOOD_LISTENING.cols,
+                       speed: _MOOD_LISTENING.speed * s, amp: _MOOD_LISTENING.amp * s,
+                       breath: _MOOD_LISTENING.breath * s };
+      } else {
+        _micTarget = null;
+      }
+    } catch(e) { _micTarget = null; }
+    setTimeout(pollMicLevel, 150);
+  }
+
+  function sectionHeader(text) {
+    const hd = document.createElement('div');
+    hd.style.cssText = 'font-size:11px;letter-spacing:0.38em;text-transform:uppercase;color:rgba(74,52,38,0.46);margin:22px 0 10px;';
+    hd.textContent = text;
+    return hd;
+  }
+
+  // 7-day mood trend: diverging bars around a zero baseline. Polarity is
+  // double-encoded (position above/below + validated CVD-safe pair
+  // #3c78b8 calmer / #b5674a heavier) so color is never the only signal.
+  function buildMoodChart(days) {
+    const wrap = document.createElement('div');
+    const H = 34; // half-height either side of the baseline
+    const row = document.createElement('div');
+    row.style.cssText = `display:flex;align-items:center;gap:2px;height:${H*2}px;position:relative;`;
+    const base = document.createElement('div');
+    base.style.cssText = `position:absolute;left:0;right:0;top:${H}px;height:1px;background:rgba(120,90,60,0.25);`;
+    row.appendChild(base);
+    days.forEach(([day, score]) => {
+      const cell = document.createElement('div');
+      cell.style.cssText = `flex:1;height:${H*2}px;position:relative;`;
+      const v = Math.max(-1, Math.min(1, score));
+      const h = Math.max(2, Math.abs(v) * H);
+      const up = v >= 0;
+      const bar = document.createElement('div');
+      bar.style.cssText =
+        `position:absolute;left:15%;right:15%;height:${h}px;` +
+        (up ? `bottom:${H}px;background:#3c78b8;border-radius:4px 4px 0 0;`
+            : `top:${H}px;background:#b5674a;border-radius:0 0 4px 4px;`);
+      const d = new Date(day + 'T00:00:00');
+      const label = isNaN(d) ? day : d.toLocaleDateString(undefined, { weekday: 'short' });
+      cell.title = `${label} ${day}: ${v >= 0 ? '+' : ''}${v.toFixed(2)}`;
+      cell.appendChild(bar);
+      const lb = document.createElement('div');
+      lb.style.cssText = `position:absolute;top:${H*2+3}px;left:0;right:0;text-align:center;font-size:9.5px;color:rgba(110,84,62,0.55);`;
+      lb.textContent = isNaN(d) ? '' : d.toLocaleDateString(undefined, { weekday: 'narrow' });
+      cell.appendChild(lb);
+      row.appendChild(cell);
+    });
+    wrap.appendChild(row);
+    const legend = document.createElement('div');
+    legend.style.cssText = 'margin-top:18px;font-size:11.5px;font-style:italic;color:rgba(110,84,62,0.6);';
+    legend.innerHTML = '<span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#3c78b8;margin-right:5px;"></span>calmer days' +
+      '<span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#b5674a;margin:0 5px 0 16px;"></span>heavier days';
+    wrap.appendChild(legend);
+    return wrap;
+  }
+
+  async function openMemory() {
+    const overlay = document.getElementById('memory-overlay');
+    const content = document.getElementById('memory-content');
+    const tasks   = document.getElementById('memory-tasks');
+    content.textContent = 'Loading…';
+    tasks.innerHTML = '';
+    overlay.style.display = 'flex';
+    togglePanel(false);
+    try {
+      const resp = await fetch('/memory');
+      const data = await resp.json();
+      content.textContent = data.summary || 'No profile yet.';
+
+      if (data.mood_days && data.mood_days.length >= 2) {
+        tasks.appendChild(sectionHeader('Mood, last 7 days'));
+        tasks.appendChild(buildMoodChart(data.mood_days));
+      }
+
+      if (data.patterns && data.patterns.length) {
+        tasks.appendChild(sectionHeader('Patterns I’ve noticed'));
+        const chips = document.createElement('div');
+        chips.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;';
+        data.patterns.forEach(p => {
+          const chip = document.createElement('span');
+          chip.style.cssText = 'padding:4px 12px;border:1px solid rgba(120,90,60,0.2);border-radius:999px;font-size:12px;color:rgba(60,42,30,0.75);background:rgba(187,115,85,0.07);';
+          const type = (p.pattern_type || '').replace(/_/g, ' ');
+          chip.textContent = `${type}: ${p.pattern_value} ×${p.frequency}`;
+          chips.appendChild(chip);
+        });
+        tasks.appendChild(chips);
+      }
+
+      if (data.adaptations && data.adaptations.length) {
+        tasks.appendChild(sectionHeader('How I’ve adapted'));
+        data.adaptations.forEach(a => {
+          const row = document.createElement('div');
+          row.style.cssText = 'padding:5px 0;border-top:1px solid rgba(120,90,60,0.08);font-size:12.5px;color:rgba(90,66,48,0.75);font-style:italic;';
+          row.textContent = a.detail || a.event || '';
+          tasks.appendChild(row);
+        });
+      }
+
+      if (data.tasks && data.tasks.length) {
+        tasks.appendChild(sectionHeader('Pending tasks'));
+        data.tasks.forEach(t => {
+          const row = document.createElement('div');
+          row.style.cssText = 'display:flex;align-items:baseline;gap:10px;padding:6px 0;border-top:1px solid rgba(120,90,60,0.1);font-size:14.5px;';
+          const dot = document.createElement('span');
+          dot.style.cssText = 'flex:none;width:5px;height:5px;border-radius:50%;background:rgba(184,122,84,0.55);margin-top:2px;';
+          const desc = document.createElement('span');
+          desc.style.cssText = 'color:rgba(60,42,30,0.82);flex:1;';
+          desc.textContent = t.task_description || '';
+          const due = document.createElement('span');
+          due.style.cssText = 'font-style:italic;color:rgba(110,84,62,0.5);font-size:12.5px;flex:none;';
+          due.textContent = t.due_date || '';
+          row.appendChild(dot); row.appendChild(desc); row.appendChild(due);
+          tasks.appendChild(row);
+        });
+      }
+    } catch (e) {
+      content.textContent = 'Could not load memory.';
+    }
+  }
+
+  function initReal() {
+    fetch('/greeting')
+      .then(r => r.json())
+      .then(data => {
+        if (data.greeting) {
+          setMood('calm');
+          const gDurMs = data.estimated_duration_ms || estimateSpeechDuration(data.greeting, 'calm');
+          // 110s: the backend holds the greeting up to 90s for the primary
+          // TTS to load, plus generation time — don't let the caption
+          // fallback fire just before the voice finally starts.
+          whenSpeechStarts(() => {
+            showARIA(data.greeting, ariaIdx++, gDurMs);
+            whenSpeechEnds(() => {
+              schedule(() => { setStatus('listening'); lean = 0; }, 500);
+            }, gDurMs + 15000);
+          }, 110000);
+        } else {
+          setStatus('listening');
+        }
+      })
+      .catch(() => setStatus('listening'));
+
+    pollVoice();
+    pollFaceMood();
+    pollMicLevel();
+  }
+
+  // ── UI wiring ─────────────────────────────────────────────────────────
+  function bindUI() {
+    rootEl.addEventListener('mousemove', (e) => {
+      const near = e.clientY > H * 0.78;
+      revealInput(near || document.activeElement === inputEl);
+    });
+    rootEl.addEventListener('mouseleave', () => revealInput(document.activeElement === inputEl));
+
+    inputEl.addEventListener('focus', () => revealInput(true));
+    inputEl.addEventListener('blur', () => schedule(() => revealInput(false), 200));
+    inputEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+    sendBtnEl.addEventListener('click', () => submit());
+    sendBtnEl.addEventListener('mouseenter', (e) => {
+      e.currentTarget.style.background = 'rgba(187,115,85,0.18)';
+      e.currentTarget.style.color = 'rgba(80,52,34,0.95)';
+    });
+    sendBtnEl.addEventListener('mouseleave', (e) => {
+      e.currentTarget.style.background = 'none';
+      e.currentTarget.style.color = 'rgba(90,62,42,0.75)';
+    });
+
+    settingsBtnEl.addEventListener('mouseenter', () => { settingsBtnEl.style.opacity = '0.7'; });
+    settingsBtnEl.addEventListener('mouseleave', () => { settingsBtnEl.style.opacity = _panelOpen ? '0.7' : '0.34'; });
+    settingsBtnEl.addEventListener('click', () => togglePanel());
+    document.addEventListener('mousedown', (e) => {
+      if (_panelOpen && !panelEl.contains(e.target) && !settingsBtnEl.contains(e.target)) togglePanel(false);
+    });
+
+    panelEl.querySelectorAll('[data-toggle]').forEach(tg => {
+      tg.addEventListener('click', () => {
+        const on = tg.getAttribute('data-on') === '1';
+        const nv = on ? 0 : 1;
+        tg.setAttribute('data-on', String(nv));
+        const knob = tg.querySelector('span');
+        knob.style.left = nv ? '21px' : '3px';
+        tg.style.background = nv ? 'rgba(187,115,85,0.55)' : 'rgba(120,90,60,0.18)';
+        const kind = tg.getAttribute('data-toggle');
+        fetch('/settings/' + kind, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: nv === 1 }),
+        }).catch(() => {});
+      });
+    });
+
+    panelEl.querySelectorAll('[data-mode]').forEach(mb => {
+      mb.addEventListener('click', () => {
+        panelEl.querySelectorAll('[data-mode]').forEach(o => {
+          o.style.background = 'transparent';
+          o.style.color = 'rgba(60,42,30,0.7)';
+          o.style.borderColor = 'rgba(120,90,60,0.16)';
+        });
+        mb.style.background = 'rgba(187,115,85,0.16)';
+        mb.style.color = 'rgba(60,42,30,0.9)';
+        mb.style.borderColor = 'rgba(187,115,85,0.35)';
+        setMood(mb.getAttribute('data-mode'));
+        ripple();
+      });
+    });
+
+    const mem = panelEl.querySelector('[data-memory]');
+    mem.addEventListener('mouseenter', () => { mem.style.opacity = '0.7'; });
+    mem.addEventListener('mouseleave', () => { mem.style.opacity = '1'; });
+    mem.addEventListener('click', () => openMemory());
+
+    const learnedBtn = document.getElementById('learned-btn');
+    learnedBtn.addEventListener('mouseenter', () => { learnedBtn.style.color = 'rgba(80,52,34,0.85)'; });
+    learnedBtn.addEventListener('mouseleave', () => { learnedBtn.style.color = 'rgba(92,68,50,0.45)'; });
+    learnedBtn.addEventListener('click', () => openMemory());
+
+    document.getElementById('memory-close').addEventListener('click', () => {
+      document.getElementById('memory-overlay').style.display = 'none';
+    });
+    document.getElementById('memory-overlay').addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) e.currentTarget.style.display = 'none';
+    });
+  }
+
+  function revealInput(show) {
+    inputWrapEl.style.opacity = show ? '1' : '0';
+    inputWrapEl.style.transform = show ? 'translateX(-50%) translateY(0)' : 'translateX(-50%) translateY(14px)';
+  }
+
+  function togglePanel(force) {
+    const open = typeof force === 'boolean' ? force : !_panelOpen;
+    _panelOpen = open;
+    panelEl.style.opacity = open ? '1' : '0';
+    panelEl.style.transform = open ? 'translateY(0) scale(1)' : 'translateY(-8px) scale(0.985)';
+    panelEl.style.pointerEvents = open ? 'auto' : 'none';
+    settingsBtnEl.style.opacity = open ? '0.7' : '0.34';
+  }
+
+  // ── boot ──────────────────────────────────────────────────────────────
+  makeNoise();
+  setupMoods();
+  setupCanvas();
+  bindUI();
+  startLoop();
+  initReal();
+
+  window.addEventListener('beforeunload', () => {
+    cancelAnimationFrame(_raf);
+    timers.forEach(clearTimeout);
+  });
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,74 @@
+ARIA behavioural pattern recognition — evaluation report
+Generated: 2026-07-08T12:07:39
+
+Real user: Sam (42 conversation rows on record)
+
+====================================================================
+STUDY 1 — Personal KNN mood classifier (leave-one-out CV, real data)
+====================================================================
+Usable real samples (voice turns with full multimodal features): 12
+LOOCV accuracy:            50.0%  (6/12)
+Majority-class baseline:   58.3%  (always 'anxious')
+Rule-based classifier:     8.3%  (fixed thresholds, no learning)
+
+Per-class precision / recall / F1:
+  anxious          P=0.55  R=0.86  F1=0.67  (support 7)
+  calm             P=0.00  R=0.00  F1=0.00  (support 1)
+  surprised        P=0.00  R=0.00  F1=0.00  (support 1)
+  tired            P=0.00  R=0.00  F1=0.00  (support 3)
+
+Confusion matrix (rows=actual, cols=predicted):
+   anxiou    calm  surpri   tired
+  anxiou       6       0       0       1
+    calm       1       0       0       0
+  surpri       1       0       0       0
+   tired       3       0       0       0
+
+====================================================================
+STUDY 2 — Pattern detection: precision/recall vs planted ground truth
+====================================================================
+Scripted messages fed: 10   patterns detected: 21
+
+  frequent_topic (top-3):
+    planted truth:   ['code', 'deadline', 'project']
+    detected top-3: ['code', 'deadline', 'project']
+    precision=1.00  recall=1.00
+
+  active_hour (top-1):
+    planted truth:   ['21']
+    detected top-1: ['21']
+    precision=1.00  recall=1.00
+
+  dominant_mood (top-2):
+    planted truth:   ['calm', 'stressed']
+    detected top-2: ['calm', 'stressed']
+    precision=1.00  recall=1.00
+
+  frequency check: 'project' planted 4x, counted 4x → PASS
+
+====================================================================
+STUDY 3 — Multimodal mood fusion: weighted vote + override rules
+====================================================================
+Weighted-vote agreement over 216 input combinations: 100.0%
+Physiological override rules (fatigue→tired, anger+negative→frustrated,
+high-pitch+fear→anxious): 3/3 PASS
+
+====================================================================
+STUDY 4 — Proactive suggestion triggers
+====================================================================
+  [PASS] pending task present → task reminder
+  [PASS] active hour + hot topic → correlation nudge
+  [PASS] hot topic alone (freq>=3) → topic nudge
+  [PASS] nothing learned yet → stays silent
+
+  4/4 trigger conditions behave as designed
+
+====================================================================
+Interpretation notes for the defense:
+- Study 1 measures the LEARNED component on the user's own data;
+  its accuracy vs the majority baseline and the static rule-based
+  classifier quantifies what personalisation adds.
+- Study 2 shows the pattern engine recovers planted behavioural
+  regularities with measurable precision/recall, not anecdotes.
+- Studies 3-4 verify the decision logic is deterministic and
+  matches its documented design.

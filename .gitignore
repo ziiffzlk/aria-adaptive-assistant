@@ -1,0 +1,32 @@
+# Secrets — real Groq key lives only in .env, never committed
+.env
+
+# Personal runtime data — conversation history, learned patterns, mood readings
+aria.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Audio — voice reference clips, recorded mic captures, TTS voice-picking
+# samples. All regeneratable / re-downloadable, and some contain the user's
+# own recorded voice (aria_voice_reference*.wav, mic_test_capture.wav).
+*.wav
+*.wav.bak
+*.flac
+
+# Downloaded model weights — re-fetched on first run (see README / requirements.txt):
+#   kokoro-v1.0.onnx, voices-v1.0.bin -> kokoro-onnx package
+#   models/face_landmarker.task       -> mediapipe
+#   Chatterbox / faster-whisper weights cache outside the repo
+#   (~/.cache/huggingface), so nothing from those needs to be listed here.
+kokoro-v1.0.onnx
+voices-v1.0.bin
+models/
+
+# Generated evaluation charts — regenerate with evaluate_accuracy.py
+/evaluation/*.png
+
+# Claude Code local settings — machine-specific, not shared
+.claude/settings.local.json
