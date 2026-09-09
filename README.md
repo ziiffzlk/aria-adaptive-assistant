@@ -1,12 +1,19 @@
 # ARIA
 
+<p align="center">
+  <img src="screenshots/01_greeting.png" width="48%" alt="Greeting">
+  <img src="screenshots/02_conversation.png" width="48%" alt="Conversation">
+</p>
+
 ARIA is a desktop AI assistant that learns how *you* specifically communicate
 and adapts to it over time, rather than treating every user the same. It
 fuses voice tone, facial expression, and conversation text to estimate mood
 in real time, builds a personal behavioural profile from usage history
 (frequent topics, active hours, recurring patterns), and uses that profile to
 shape both *what* it offers and *how* it responds — not just a fixed tone
-overlay on identical answers. Built as a final-year Computer Science project.
+overlay on identical answers. Featuring an open-canvas, editorial typography
+interface, ARIA operates as a borderless desktop agent. Built as a final-year 
+Computer Science project.
 
 ## Key features
 

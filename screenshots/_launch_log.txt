@@ -1,0 +1,35 @@
+[system_actions] 18 apps available: browser, calculator, chrome, control_panel, edge, excel, explorer, firefox, notepad, paint, powerpoint, powershell, settings, spotify, task_manager, terminal, vscode, word
+[brain] Groq client initialised successfully
+[main] Starting ARIA (web UI)�
+[database] Database initialised at C:\Users\PC\Desktop\aria-desktop\aria.db
+[main] Welcome back, Sam (id=1)
+[main] Starting TTS (primary engine: Chatterbox; loads in background)�
+[voice] Primary engine: Chatterbox (Kokoro is fallback)
+[main] Starting face analyzer�
+[voice:chatterbox] Voice references ready (existing)
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1783927416.199620   23708 port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+[voice:kokoro] Model loaded — Kokoro TTS ready
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1783927423.405068   23708 port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+[voice:chatterbox] perth watermarker unavailable — using no-op patch
+[voice:chatterbox] Loading Turbo (350M) model on cuda…
+W0000 00:00:1783927424.904832   35392 face_landmarker_graph.cc:180] Sets FaceBlendshapesGraph acceleration to xnnpack by default.
+INFO: Created TensorFlow Lite XNNPACK delegate for CPU.
+W0000 00:00:1783927424.914752    4948 inference_feedback_manager.cc:121] Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.
+W0000 00:00:1783927424.925131   33240 inference_feedback_manager.cc:121] Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.
+[face] Camera started, face analysis running in background
+[main] Starting wake-word listener…
+[voice] 00:23:45.639 Wake-word thread ACTUALLY started, thread alive=True
+[main] Starting task reminders…
+[reminders] Task reminder thread started
+[main] Starting Flask on port 57270…
+[patterns] KNN mood classifier trained for user 1 on 49 samples
+ * Serving Flask app 'app_web'
+ * Debug mode: off
+[voice] Using microphone device: Microphone Array (Realtek(R) Au (capture 16000Hz, 30ms frames, VAD aggressiveness 2)
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on http://127.0.0.1:57270
+Press CTRL+C to quit
+[vad] Calibrating ambient noise floor (1.5s, 50 frames)…
+[main] Flask ready at http://127.0.0.1:57270
