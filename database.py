@@ -72,6 +72,38 @@ def init_db():
     """)
 
     cur.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS conversations_fts USING fts5(
+            user_message,
+            ai_response,
+            content='conversations',
+            content_rowid='id'
+        )
+    """)
+
+    cur.execute("""
+        CREATE TRIGGER IF NOT EXISTS conversations_ai AFTER INSERT ON conversations BEGIN
+            INSERT INTO conversations_fts(rowid, user_message, ai_response)
+            VALUES (new.id, new.user_message, new.ai_response);
+        END;
+    """)
+
+    cur.execute("""
+        CREATE TRIGGER IF NOT EXISTS conversations_ad AFTER DELETE ON conversations BEGIN
+            INSERT INTO conversations_fts(conversations_fts, rowid, user_message, ai_response)
+            VALUES('delete', old.id, old.user_message, old.ai_response);
+        END;
+    """)
+
+    cur.execute("""
+        CREATE TRIGGER IF NOT EXISTS conversations_au AFTER UPDATE ON conversations BEGIN
+            INSERT INTO conversations_fts(conversations_fts, rowid, user_message, ai_response)
+            VALUES('delete', old.id, old.user_message, old.ai_response);
+            INSERT INTO conversations_fts(rowid, user_message, ai_response)
+            VALUES (new.id, new.user_message, new.ai_response);
+        END;
+    """)
+
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS patterns (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
@@ -144,6 +176,22 @@ def init_db():
         )
     """)
 
+    # Cooldown tracking for proactive suggestions (patterns.get_proactive_suggestion) —
+    # without this, the same pending task or topic nudge gets offered on
+    # literally every turn since it's otherwise a pure function of
+    # (pending_tasks, patterns, hour) with no memory of having just said it.
+    # suggestion_key is a stable identity for what was suggested (e.g.
+    # "task:<id>" or "topic:<value>"), not the rendered text, so cooldown
+    # survives minor wording changes.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS proactive_suggestion_state (
+            user_id INTEGER,
+            suggestion_key TEXT,
+            last_surfaced DATETIME,
+            PRIMARY KEY (user_id, suggestion_key)
+        )
+    """)
+
     # Every other table's lookups filter by user_id - index it everywhere
     # it's queried so those filters don't degenerate into full table scans
     # as conversation/pattern/mood history grows across a long-running app.
@@ -162,6 +210,33 @@ def init_db():
         print("[database] migrated: mood_readings.ground_truth_mood added")
     except sqlite3.OperationalError:
         pass  # column already exists
+
+    # C1: correction_source distinguishes user-correction ground-truth labels
+    # ("user_correction") from self-report labels ("label" command) so the
+    # KNN training pipeline can weight them appropriately and the adaptation
+    # log can surface them separately.
+    try:
+        cur.execute("ALTER TABLE mood_readings ADD COLUMN correction_source TEXT")
+        print("[database] migrated: mood_readings.correction_source added")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
+    # C4: mentioned_concerns — stores future-oriented statements the user made
+    # ("I have a presentation tomorrow") so ARIA can ask once after the window
+    # passes if the topic wasn't naturally resolved in conversation.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS mentioned_concerns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            concern_text TEXT,
+            mentioned_at DATETIME,
+            resolution_window_hours INTEGER DEFAULT 24,
+            followed_up INTEGER DEFAULT 0,
+            resolved INTEGER DEFAULT 0,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_concerns_user ON mentioned_concerns(user_id)")
 
     conn.commit()
     print("[database] Database initialised at", DB_PATH)
@@ -400,9 +475,13 @@ def save_mood_reading(user_id, voice_mood, face_mood, text_mood, fused_mood, int
     return cur.lastrowid
 
 
-def set_ground_truth_mood(user_id, mood):
-    """Attach a self-reported ground-truth label to the user's most recent
-    mood reading (the turn they are labelling). Returns the row id or None."""
+def set_ground_truth_mood(user_id, mood, source=None):
+    """Attach a ground-truth label to the user's most recent mood reading.
+
+    source: optional string tag written to correction_source — e.g.
+    "user_correction" (C1 automatic detection) vs None ("label" command).
+    Returns the row id or None.
+    """
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("""
@@ -411,8 +490,10 @@ def set_ground_truth_mood(user_id, mood):
     row = cur.fetchone()
     if not row:
         return None
-    cur.execute("UPDATE mood_readings SET ground_truth_mood = ? WHERE id = ?",
-                (mood.strip().lower(), row["id"]))
+    cur.execute(
+        "UPDATE mood_readings SET ground_truth_mood = ?, correction_source = ? WHERE id = ?",
+        (mood.strip().lower(), source, row["id"]),
+    )
     conn.commit()
     return row["id"]
 
@@ -448,6 +529,19 @@ def get_all_mood_readings(user_id):
     cur = conn.cursor()
     cur.execute("SELECT * FROM mood_readings WHERE user_id = ? ORDER BY timestamp ASC", (user_id,))
     return [dict(r) for r in cur.fetchall()]
+
+
+def get_recent_fused_moods(user_id, limit=5):
+    """Most recent fused_mood values, newest first — used to detect a
+    SUSTAINED mood pattern (several real turns in a row), as opposed to a
+    single momentary reading (see patterns.is_mood_sustained)."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT fused_mood FROM mood_readings
+        WHERE user_id = ? ORDER BY id DESC LIMIT ?
+    """, (user_id, limit))
+    return [r["fused_mood"] for r in cur.fetchall()]
 
 
 # ----------------------------------------------------------------------
@@ -568,7 +662,143 @@ def get_adaptation_log(user_id, limit=12):
     return [dict(r) for r in cur.fetchall()]
 
 
+# ----------------------------------------------------------------------
+# Proactive suggestion cooldown
+# ----------------------------------------------------------------------
+
+def get_suggestion_last_surfaced(user_id, suggestion_key):
+    """Return the ISO timestamp this suggestion_key was last surfaced to the
+    user, or None if never (or not since it was last dismissed/changed)."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT last_surfaced FROM proactive_suggestion_state
+        WHERE user_id = ? AND suggestion_key = ?
+    """, (user_id, suggestion_key))
+    row = cur.fetchone()
+    return row["last_surfaced"] if row else None
+
+
+def mark_suggestion_surfaced(user_id, suggestion_key):
+    """Record that this suggestion was just offered, starting its cooldown."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO proactive_suggestion_state (user_id, suggestion_key, last_surfaced)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id, suggestion_key) DO UPDATE SET last_surfaced = excluded.last_surfaced
+    """, (user_id, suggestion_key, _now()))
+    conn.commit()
+
+
+# ----------------------------------------------------------------------
+# C4 — Mentioned concerns (proactive follow-through)
+# ----------------------------------------------------------------------
+
+def save_mentioned_concern(user_id, concern_text, resolution_window_hours=24):
+    """Store a future-oriented concern the user just mentioned.
+
+    resolution_window_hours: how long to wait before ARIA may follow up.
+    After this window, if the concern hasn't been naturally resolved or
+    followed-up on, get_pending_concerns() will surface it.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO mentioned_concerns
+            (user_id, concern_text, mentioned_at, resolution_window_hours)
+        VALUES (?, ?, ?, ?)
+    """, (user_id, concern_text, _now(), resolution_window_hours))
+    conn.commit()
+    return cur.lastrowid
+
+
+def get_pending_concerns(user_id):
+    """Return concerns whose resolution window has passed and haven't been
+    followed up or resolved yet. Oldest first.
+
+    The window check is done via SQLite datetime arithmetic so it respects
+    whatever local timezone was used when mentioned_at was written (same
+    _now() convention as every other timestamp in this module).
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT * FROM mentioned_concerns
+        WHERE user_id = ?
+          AND followed_up = 0
+          AND resolved = 0
+          AND datetime(mentioned_at, '+' || resolution_window_hours || ' hours') <= datetime('now', 'localtime')
+        ORDER BY mentioned_at ASC
+    """, (user_id,))
+    return [dict(r) for r in cur.fetchall()]
+
+
+def get_all_concerns(user_id, limit=20):
+    """Return the most recent concerns for a user (all states), newest first."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT * FROM mentioned_concerns
+        WHERE user_id = ?
+        ORDER BY mentioned_at DESC
+        LIMIT ?
+    """, (user_id, limit))
+    return [dict(r) for r in cur.fetchall()]
+
+
+def mark_concern_followed_up(concern_id):
+    """Record that ARIA asked the follow-up question for this concern.
+    Once followed up, it will never be asked again (followed_up=1 gate).
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE mentioned_concerns SET followed_up = 1 WHERE id = ?", (concern_id,))
+    conn.commit()
+
+
+def mark_concern_resolved(concern_id):
+    """Mark a concern as resolved (user referenced it themselves before the
+    follow-up window, or explicitly said it went fine).
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE mentioned_concerns SET resolved = 1 WHERE id = ?", (concern_id,))
+    conn.commit()
+
+
+def get_recent_concern_count(user_id, event_type="mood_corrected", days=7):
+    """Count adaptation_log events of a given type in the last `days` days.
+    Used by generate_weekly_digest to count C1 mood corrections as an
+    improvement-signal proxy.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    since = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+    cur.execute("""
+        SELECT COUNT(*) AS c FROM adaptation_log
+        WHERE user_id = ? AND event = ? AND timestamp >= ?
+    """, (user_id, event_type, since))
+    return cur.fetchone()["c"]
+
+
+def search_conversations(user_id: int, query: str, limit: int = 5) -> list[dict]:
+    """Offline FTS5 search across the user's historical conversations."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT c.id, c.user_message, c.ai_response, c.timestamp 
+        FROM conversations_fts fts
+        JOIN conversations c ON fts.rowid = c.id
+        WHERE conversations_fts MATCH ? AND c.user_id = ?
+        ORDER BY rank
+        LIMIT ?
+    """, (query, user_id, limit))
+    return [dict(r) for r in cur.fetchall()]
+
+
 if __name__ == "__main__":
+
     # Quick manual smoke test: python database.py
     init_db()
     uid = get_or_create_user("Test User")

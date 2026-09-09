@@ -6,18 +6,38 @@ Startup sequence:
 1. Init database
 2. Identify user (reuse existing or prompt via terminal on first run)
 3. Start TTS engine (primary engine loads in background; Kokoro is always the fallback)
-4. Start face analyzer (skipped gracefully if no camera)
+4. Start face analyzer (skipped gracefully if no camera); enroll a
+   reference face for identity verification if this user has none yet
 5. Start wake-word listener thread (puts recognised text onto voice queue)
 6. Start Flask in a daemon thread on a random local port
 7. Open a borderless pywebview window at http://127.0.0.1:<port>
 8. On close: stop mic, stop camera, shut down TTS
 """
 
-import socket
+
+import os
 import sys
+
+# ── Auto-relaunch inside .venv if running with the wrong Python ──────────────
+# Lets you run `python main_desktop.py` from any terminal regardless of which
+# Python is active — it will silently restart itself with the venv Python if
+# the current interpreter isn't the venv one.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_VENV_PYTHON = os.path.join(_HERE, ".venv", "Scripts", "python.exe")
+if (
+    os.path.exists(_VENV_PYTHON)
+    and os.path.abspath(sys.executable) != os.path.abspath(_VENV_PYTHON)
+):
+    import subprocess
+    result = subprocess.run([_VENV_PYTHON] + sys.argv)
+    sys.exit(result.returncode)
+# ─────────────────────────────────────────────────────────────────────────────
+
+import socket
 import threading
 import time
 from datetime import datetime
+
 
 # Line-buffer stdio: with output redirected (logs, IDE terminals), Python
 # block-buffers stdout and the entire voice pipeline's prints sat invisible
@@ -32,9 +52,12 @@ import webview
 
 import app_web
 import database
+import network_state
 import patterns
+import power_state
 import reminders
 import voice
+import ui_hud
 
 
 # ── helpers ────────────────────────────────────────────────────────────
@@ -140,31 +163,50 @@ def main():
 
     database.init_db()
 
+    print("[main] Starting power-state monitor…")
+    power_state.start()
+
+    print("[main] Starting network-state monitor…")
+    network_state.start()
+
     user_id, user_name = _identify_user()
     app_web._user_id   = user_id
     app_web._user_name = user_name
+
+    # print("[main] Starting telemetry HUD overlay...")
+    # ui_hud.start_hud(user_id)
 
     engine_name = voice.TTS_ENGINE.capitalize()
     print(f"[main] Starting TTS (primary engine: {engine_name}; loads in background)…")
     voice.init_tts()
 
-    print("[main] Starting face analyzer…")
-    try:
-        from face import FaceAnalyzer
-        face_analyzer = FaceAnalyzer()
-        face_analyzer.start()
-        app_web._face_analyzer = face_analyzer
-    except Exception as e:
-        print(f"[main] Face analyzer unavailable: {e}")
-        face_analyzer = None
+    def _deferred_start():
+        time.sleep(2.0)
+        print("[main] Starting face analyzer (deferred)…")
+        try:
+            from face import FaceAnalyzer, ENROLLED_FACES_DIR
+            face_analyzer = FaceAnalyzer()
+            if face_analyzer.start():
+                # One-time identity enrollment
+                enroll_path = os.path.join(ENROLLED_FACES_DIR, f"user_{user_id}.jpg")
+                if os.path.exists(enroll_path):
+                    face_analyzer.set_enrollment_path(enroll_path)
+                else:
+                    print("[main] No enrolled face on file for this user — enrolling now (look at the camera)...")
+                    face_analyzer.enroll(enroll_path)
+            app_web._face_analyzer = face_analyzer
+        except Exception as e:
+            print(f"[main] Face analyzer unavailable: {e}")
 
-    print("[main] Starting wake-word listener…")
-    threading.Thread(
-        target=voice.listen_continuous,
-        args=(_voice_callback,),
-        kwargs={"wake_word": "aria"},
-        daemon=True,
-    ).start()
+        print("[main] Starting wake-word listener (deferred)… [DISABLED]")
+        # threading.Thread(
+        #     target=voice.listen_continuous,
+        #     args=(_voice_callback,),
+        #     kwargs={"wake_word": "aria"},
+        #     daemon=True,
+        # ).start()
+
+    threading.Thread(target=_deferred_start, daemon=True).start()
 
     print("[main] Starting task reminders…")
     reminders.start(user_id)
@@ -194,8 +236,8 @@ def main():
         voice.stop_continuous_listening()
         reminders.stop()
         voice.shutdown_tts()
-        if face_analyzer:
-            face_analyzer.stop()
+        if hasattr(app_web, '_face_analyzer') and app_web._face_analyzer:
+            app_web._face_analyzer.stop()
         print("[main] Goodbye.")
 
     class _Api:
@@ -237,7 +279,7 @@ def main():
     window.events.loaded += _inject_shortcuts
 
     print("[main] Opening window (fullscreen — press F11 to toggle)…")
-    webview.start(debug=False)
+    webview.start(debug=True)
 
 
 if __name__ == "__main__":

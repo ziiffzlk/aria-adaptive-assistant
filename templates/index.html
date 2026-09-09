@@ -1,17 +1,143 @@
 <!DOCTYPE html>
 <html>
 <head>
+<script>window.onerror = function(m, u, l, c, e) { fetch('/log', {method:'POST', body: m + ' at ' + l + ':' + c}); };</script>
+
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,500;1,9..144,300;1,9..144,400&family=Spectral:ital,wght@0,300;0,400;1,300;1,400&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,300;0,400;0,500;0,600;1,300&family=Syne:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+  <!-- Markdown & LaTeX math rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js"></script>
 <style>
-  html, body { margin: 0; height: 100%; background: #f3ebdc; overflow: hidden; }
+
+    .markdown-body pre { background: rgba(0,0,0,0.05); padding: 12px; border-radius: 8px; overflow-x: auto; font-family: monospace; font-size: 0.85em; }
+    .markdown-body code { background: rgba(0,0,0,0.05); padding: 2px 4px; border-radius: 4px; font-family: monospace; font-size: 0.9em; }
+    .markdown-body p { margin-bottom: 0.8em; }
+    .markdown-body p:last-child { margin-bottom: 0; }
+
+  html, body { margin: 0; height: 100%; background: #0f0f11; overflow: hidden; }
   *, *::before, *::after { box-sizing: border-box; }
   @keyframes ariaPulse { 0%, 100% { opacity: .3; transform: scale(1); } 50% { opacity: .65; transform: scale(1.3); } }
-  ::placeholder { color: rgba(110,88,70,0.38); font-style: italic; }
-  ::-webkit-scrollbar { width: 0; height: 0; }
+  ::placeholder { color: rgba(0,0,0,0.4); font-style: italic; }
+  ::-webkit-scrollbar { width: 6px; height: 0; }
+  ::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); border-radius: 4px; }
+  
+  /* Custom Typography */
+  :root {
+    --font-main: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    --font-accent: 'Syne', sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+    --color-aria: #000000;
+    --color-user: rgba(0, 0, 0, 0.6);
+  }
+
+  /* Master Open Canvas (Whole Window Scrolls) */
+  .chat-container {
+    width: 100%;
+    max-width: 1000px;
+    margin: 0 0 0 4rem; /* Anchored to the left side of the screen */
+    height: calc(100vh - 120px);
+    overflow-y: auto;
+    padding: 3rem 2rem 8rem;
+    display: flex;
+    flex-direction: column;
+    gap: 3.5rem;
+    scrollbar-width: none;
+    position: relative;
+    z-index: 4;
+    pointer-events: auto;
+  }
+  .chat-container::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Fade-in animation for incoming responses */
+  @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ARIA Text: Pure Borderless Canvas (Zero Boxes / Zero Backgrounds) */
+  .aria-bubble {
+    max-width: 100% !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    
+    font-family: var(--font-main);
+    font-size: 1.45rem;
+    font-weight: 350;
+    line-height: 1.8;
+    color: var(--color-aria);
+    letter-spacing: -0.015em;
+    align-self: flex-start;
+    animation: fadeIn 0.4s ease-out forwards;
+  }
+
+  /* User Message: Minimalist Lead-In Header */
+  .user-bubble {
+    align-self: flex-end;
+    max-width: 100% !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    
+    font-family: var(--font-accent);
+    font-size: 1.15rem;
+    font-weight: 500;
+    color: var(--color-user);
+    letter-spacing: 0.02em;
+    margin-bottom: -1.75rem;
+    animation: fadeIn 0.4s ease-out forwards;
+  }
+
+  /* LaTeX Formulas & Code Blocks on Canvas */
+  .aria-bubble .katex-display {
+    margin: 1.75rem 0;
+    font-size: 1.3em;
+  }
+
+  pre {
+    background: rgba(255, 255, 255, 0.04) !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    border-radius: 12px;
+    padding: 1.25rem;
+    font-family: var(--font-mono) !important;
+    font-size: 0.95rem;
+  }
+
+  code {
+    font-family: var(--font-mono) !important;
+    font-size: 0.9em;
+  }
+
+  /* Ambient Action Badges */
+  .action-tray {
+    display: flex;
+    gap: 1.25rem;
+    margin-top: 1.5rem;
+  }
+  .action-chip {
+    background: transparent;
+    border: none;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: rgba(255, 255, 255, 0.4);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    padding: 0;
+  }
 </style>
 </head>
 <body>
@@ -30,8 +156,7 @@
 
   <canvas id="canvas" style="position: absolute; inset: 0; width: 100%; height: 100%; display: block;"></canvas>
 
-  <div id="aria-layer" style="position: absolute; inset: 0; pointer-events: none; z-index: 3;"></div>
-  <div id="user-layer" style="position: absolute; inset: 0; pointer-events: none; z-index: 2;"></div>
+  <div id="chatContainer" class="chat-container"></div>
 
   <div style="position: absolute; top: 38px; left: 44px; z-index: 5; font-family: 'Spectral', serif; font-size: 11px; letter-spacing: 0.46em; text-transform: uppercase; color: rgba(78,56,40,0.5); user-select: none;">ARIA</div>
 
@@ -111,8 +236,7 @@ document.addEventListener('DOMContentLoaded', function () {
   // ── elements ─────────────────────────────────────────────────────────
   const rootEl        = document.getElementById('root');
   const canvasEl      = document.getElementById('canvas');
-  const ariaEl        = document.getElementById('aria-layer');
-  const userEl        = document.getElementById('user-layer');
+  const chatContainer = document.getElementById('chatContainer');
   const statusEl      = document.getElementById('status');
   const settingsBtnEl = document.getElementById('settings-btn');
   const panelEl       = document.getElementById('panel');
@@ -342,98 +466,80 @@ document.addEventListener('DOMContentLoaded', function () {
     return (words / (2.5 * speed)) * 1000;
   }
 
-  function showLine(container, text, opts) {
-    const old = container._cur;
-    if (old) {
-      old.style.opacity = '0';
-      old.style.filter = 'blur(11px)';
-      old.style.transform = (old._baseTransform || '') + ' translateY(-6px)';
-      const o = old; schedule(() => o.remove(), 1700);
-    }
-    const block = document.createElement('div');
-    block.style.position = 'absolute';
-    if (opts.left)   block.style.left = opts.left;
-    if (opts.right)  block.style.right = opts.right;
-    if (opts.bottom) block.style.bottom = opts.bottom;
-    else             block.style.top = opts.top;
-    block.style.maxWidth    = opts.maxWidth;
-    block.style.textAlign   = opts.textAlign || 'left';
-    block.style.fontFamily  = opts.font;
-    block.style.fontSize    = opts.size;
-    block.style.fontStyle   = opts.italic ? 'italic' : 'normal';
-    block.style.fontWeight  = opts.weight || '400';
-    block.style.lineHeight  = opts.lh || '1.14';
-    block.style.color       = opts.color;
-    block.style.letterSpacing = opts.ls || '-0.005em';
-    block._baseTransform    = opts.transform || '';
-    block.style.transform   = block._baseTransform;
-    block.style.transition  = 'opacity 1.6s ease, filter 1.6s ease';
-
-    const words = text.split(' ');
-    // Dynamic stagger: spread reveals evenly across the speech duration so
-    // the last word appears just before speaking ends rather than all at once.
-    let stagger = opts.stagger || 150;
-    if (opts.durationMs) {
-      const usable = Math.max(opts.durationMs - 840, words.length * 80);
-      stagger = Math.max(80, Math.min(550, usable / Math.max(words.length - 1, 1)));
-    }
-    words.forEach((w, i) => {
-      const sp = document.createElement('span');
-      sp.textContent = w + ' ';
-      sp.style.display = 'inline-block';
-      sp.style.opacity = '0';
-      sp.style.filter = 'blur(6px)';
-      sp.style.transform = 'translateY(9px)';
-      sp.style.transition = 'opacity 1.4s cubic-bezier(.2,.6,.2,1), filter 1.5s cubic-bezier(.2,.6,.2,1), transform 1.5s cubic-bezier(.2,.6,.2,1)';
-      block.appendChild(sp);
-      schedule(() => {
-        sp.style.opacity = String(opts.alpha);
-        sp.style.filter = 'blur(0px)';
-        sp.style.transform = 'translateY(0)';
-      }, 240 + i * stagger);
-    });
-    container.appendChild(block);
-    container._cur = block;
-    return block;
-  }
-
-  function fadeOut(container, delay) {
-    schedule(() => {
-      const b = container._cur;
-      if (b) {
-        b.style.opacity = '0'; b.style.filter = 'blur(11px)';
-        const x = b;
-        schedule(() => { if (container._cur === x) { x.remove(); container._cur = null; } }, 1700);
-      }
-    }, delay);
-  }
+  function renderAssistantMessage(rawText, containerElement) {
+       const blockMath = [];
+       const inlineMath = [];
+       
+       // Step 1: Shield Block Math ($$...$$)
+       let shielded = rawText.replace(/\$\$([\s\S]*?)\$\$/g, (match) => {
+           blockMath.push(match);
+           return `@@BLOCK_MATH_${blockMath.length - 1}@@`;
+       });
+       
+       // Step 2: Shield Inline Math ($...$)
+       shielded = shielded.replace(/\$([^\$\n]+?)\$/g, (match) => {
+           inlineMath.push(match);
+           return `@@INLINE_MATH_${inlineMath.length - 1}@@`;
+       });
+       
+       // Step 3: Parse Markdown
+       let html = typeof marked !== 'undefined' ? marked.parse(shielded) : shielded;
+       
+       // Step 4: Restore Math Blocks
+       html = html.replace(/@@BLOCK_MATH_(\d+)@@/g, (_, i) => blockMath[Number(i)]);
+       html = html.replace(/@@INLINE_MATH_(\d+)@@/g, (_, i) => inlineMath[Number(i)]);
+       
+       containerElement.innerHTML = html;
+       
+       // Step 5: Render KaTeX
+       if (window.renderMathInElement) {
+           renderMathInElement(containerElement, {
+               delimiters: [
+                   { left: "$$", right: "$$", display: true },
+                   { left: "$", right: "$", display: false },
+                   { left: "\\[", right: "\\]", display: true },
+                   { left: "\\(", right: "\\)", display: false }
+               ],
+               throwOnError: false
+           });
+       }
+   }
 
   function showARIA(text, ai, durationMs) {
-    const a = anchors()[ai % 4];
     lean = 0;
     ripple();
     setStatus('speaking');
-    return showLine(ariaEl, text, Object.assign({}, a, {
-      font: "'Fraunces', Georgia, serif",
-      size: 'clamp(20px, 2.4vw, 34px)',
-      weight: '400', lh: '1.12', ls: '-0.012em',
-      color: 'rgba(56,38,26,0.93)', alpha: 0.93,
-      durationMs: durationMs || null,
-    }));
+    
+    const block = document.createElement('div');
+    block.className = 'aria-bubble markdown-body';
+    renderAssistantMessage(text, block);
+    
+    chatContainer.appendChild(block);
+    
+    // Auto-scroll to the bottom
+    setTimeout(() => {
+      chatContainer.scrollTop = chatContainer.scrollHeight;
+    }, 50);
+    
+    return block;
   }
 
   function showUser(text) {
     lean = 1;
     setStatus('listening');
-    const b = showLine(userEl, text, {
-      left: '50%', bottom: 'calc(6.5vh + 58px)', transform: 'translateX(-50%)',
-      maxWidth: 'min(560px, 74vw)', textAlign: 'center',
-      font: "'Spectral', serif", size: 'clamp(16px, 1.9vw, 23px)',
-      italic: true, weight: '300', lh: '1.35', ls: '0.01em',
-      color: 'rgba(112,86,66,0.78)', alpha: 0.78, stagger: 95,
-    });
-    fadeOut(userEl, 4200);
-    return b;
+    
+    const block = document.createElement('div');
+    block.className = 'user-bubble';
+    block.textContent = text;
+    
+    chatContainer.appendChild(block);
+    
+    // Auto-scroll to the bottom
+    setTimeout(() => {
+      chatContainer.scrollTop = chatContainer.scrollHeight;
+    }, 50);
+    
+    return block;
   }
 
   function setStatus(word) {
@@ -507,15 +613,13 @@ document.addEventListener('DOMContentLoaded', function () {
       const data = await resp.json();
       const mood = data.mood || 'calm';
       const durMs = data.estimated_duration_ms || estimateSpeechDuration(data.response, mood);
-      // Caption is gated on actual audio playback start, not response receipt;
-      // the turn is released when playback actually ENDS, not on an estimate.
-      whenSpeechStarts(() => {
-        setMood(toVisualMood(mood));
-        showARIA(data.response, ariaIdx++, durMs);
-        whenSpeechEnds(() => {
-          schedule(() => { setStatus('listening'); lean = 0; _busy = false; }, 500);
-        }, durMs + 15000);
-      });
+      // Instantly display the text to perfectly sync with the start of TTS audio
+      setMood(toVisualMood(mood));
+      showARIA(data.response, ariaIdx++, durMs, data.actions_triggered || []);
+
+      whenSpeechEnds(() => {
+        schedule(() => { setStatus('listening'); lean = 0; _busy = false; }, 500);
+      }, durMs + 15000);
     } catch (e) {
       console.error('[aria] /send failed', e);
       showARIA('Something went quiet. Try again?', ariaIdx++, 2400);
@@ -551,7 +655,8 @@ document.addEventListener('DOMContentLoaded', function () {
       const sw = statusEl.querySelector('[data-status-word]');
       const currentWord = sw ? sw.textContent : 'listening';
       if (data.face_detected && data.visual_mood && currentWord === 'listening' && !_busy) {
-        setMood(data.visual_mood);
+        // Disabled per persona rules: Stop unprompted UI triggers when emotion metrics change.
+        // setMood(data.visual_mood);
       }
     } catch (e) {}
     setTimeout(pollFaceMood, 5000);
@@ -736,12 +841,12 @@ document.addEventListener('DOMContentLoaded', function () {
           // 110s: the backend holds the greeting up to 90s for the primary
           // TTS to load, plus generation time — don't let the caption
           // fallback fire just before the voice finally starts.
+          showARIA(data.greeting, ariaIdx++, gDurMs);
           whenSpeechStarts(() => {
-            showARIA(data.greeting, ariaIdx++, gDurMs);
             whenSpeechEnds(() => {
               schedule(() => { setStatus('listening'); lean = 0; }, 500);
             }, gDurMs + 15000);
-          }, 110000);
+          }, 45000);
         } else {
           setStatus('listening');
         }

@@ -14,15 +14,66 @@ consecutive OOM hits so the rest of the pipeline is unaffected.
 
 import atexit
 import io
+import queue
 import os
 import re
 import threading
 import time
+import wave
+import uuid
+import collections
 
 import numpy as np
 import librosa
 import speech_recognition as sr
+import network_state
 
+import power_state
+
+def clean_for_tts(text: str) -> str:
+    """
+    Strips raw LaTeX delimiters, Markdown symbols, and action tags so 
+    Kokoro / Chatterbox only speaks clean, natural dialogue.
+    """
+    # 1. Remove action tags
+    text = re.sub(r'\[TOOL:[^\]]*\]', '', text)
+
+    # 2. Replace complex display math / matrix blocks with a spoken reference
+    text = re.sub(r'\$\$\\begin\{[a-zA-Z*]+\}[\s\S]*?\\end\{[a-zA-Z*]+\}\$\$', 'as shown in the matrix on screen,', text)
+    text = re.sub(r'\$\$[\s\S]*?\$\$', 'as shown in the formula,', text)
+    
+    # 3. Strip multi-line code blocks and replace with a spoken cue
+    text = re.sub(r'```[a-zA-Z0-9_-]*\n[\s\S]*?\n```', ' as shown in the code snippet on screen, ', text)
+
+    # 4. Strip inline backticks (e.g., `var_name` -> "var_name")
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+
+    # 5. Convert common LaTeX math operators to spoken English
+    replacements = {
+        r'\\le': ' less than or equal to ',
+        r'\\ge': ' greater than or equal to ',
+        r'\\neq': ' not equal to ',
+        r'\\times': ' times ',
+        r'\\cdot': ' dot ',
+        r'\\pm': ' plus or minus ',
+        r'\\approx': ' approximately ',
+    }
+    for pattern, spoken in replacements.items():
+        text = re.sub(pattern, spoken, text)
+
+    # 4. Handle inline math: strip dollar signs, subscripts, and exponents
+    text = re.sub(r'\\text\{([^}]*)\}', r'\1', text)  # Extract \text{...}
+    text = re.sub(r'(\w+)\^T', r'\1 transpose', text)   # Turn c^T into "c transpose"
+    text = re.sub(r'(\w+)_(\w+|\d+)', r'\1 \2', text)  # Turn x_1 into "x 1", s_i into "s i"
+    text = re.sub(r'\$', '', text)                     # Remove all $ symbols
+    text = re.sub(r'\\[a-zA-Z]+', '', text)            # Remove remaining \backslash commands
+    text = re.sub(r'[{}\[\]\(\)]', ' ', text)          # Strip braces and brackets
+
+    # 5. Strip Markdown characters (headers, bold, italics, stray backticks)
+    text = re.sub(r'[*#`_~>]', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+
+    return text
 # ----------------------------------------------------------------------
 # Module state
 # ----------------------------------------------------------------------
@@ -58,6 +109,11 @@ _turn_t0: float | None = None
 # the UI (via /mic_level) so captions can sync to real playback, not to when
 # the AI text arrived (which can lead the voice by the whole TTS generation).
 _tts_speaking: bool = False
+
+# C5: User baseline speaking rate (words/sec), computed from their accumulated
+# voice history. None until enough samples exist (see patterns.get_user_baseline_speaking_rate).
+# Set by app_web._post_turn_learning() after each successful pace calibration.
+_user_baseline_rate: float | None = None
 
 
 def mark_turn_start():
@@ -126,17 +182,62 @@ _assistant_state: str = "IDLE"
 _speak_epoch: int = 0
 
 
+_assistant_state_changed_at: float = time.time()
+
+# States that must never persist indefinitely — THINKING/SPEAKING are both
+# "waiting on an external operation to finish" states (an LLM call, audio
+# playback); an unhandled exception anywhere in that path could leave the
+# state stuck, which disables the input bar (see index.html's _busy gating)
+# with no way to recover short of restarting the app. LISTENING is the real
+# resting state (not IDLE — IDLE is only pre-start/post-shutdown), so it's
+# deliberately excluded: the watchdog must never "fix" a perfectly normal
+# idle-listening session.
+_WATCHDOG_ACTIVE_STATES = {"THINKING", "SPEAKING"}
+_STATE_WATCHDOG_TIMEOUT_S = 45
+_STATE_WATCHDOG_POLL_S = 5
+
+
 def get_assistant_state() -> str:
     return _assistant_state
 
 
 def set_assistant_state(state: str):
-    global _assistant_state
+    global _assistant_state, _assistant_state_changed_at
+    if state != _assistant_state:
+        _assistant_state_changed_at = time.time()
     _assistant_state = state
+
+
+def _state_watchdog_loop():
+    """Background safety net: force-reset to LISTENING if the state machine
+    has been stuck in an active (THINKING/SPEAKING) state for too long. This
+    is deliberately generic — it doesn't know WHY the state got stuck, just
+    that it did, so it recovers from any silently-swallowed exception in the
+    request/response/playback path, not just ones we've already seen."""
+    while not _stop_event.is_set():
+        time.sleep(_STATE_WATCHDOG_POLL_S)
+        state = _assistant_state
+        if state in _WATCHDOG_ACTIVE_STATES:
+            elapsed = time.time() - _assistant_state_changed_at
+            if elapsed > _STATE_WATCHDOG_TIMEOUT_S:
+                print(f"[watchdog] Forced state reset from stuck state: {state} "
+                      f"(stuck for {elapsed:.0f}s)")
+                try:
+                    stop_playback()
+                except Exception as e:
+                    print(f"[watchdog] stop_playback during recovery failed: {e}")
+                set_assistant_state("LISTENING")
 
 
 def stop_playback():
     """Halt all audio output paths immediately (sounddevice + pygame)."""
+    try:
+        while not _playback_queue.empty():
+            _playback_queue.get_nowait()
+            _playback_queue.task_done()
+    except Exception:
+        pass
+        
     try:
         import sounddevice as sd
         sd.stop()   # also unblocks any sd.wait() in the speak thread
@@ -176,8 +277,15 @@ def handle_barge_in(speech_started_at: float | None = None):
 
 # Kokoro model files live alongside this script.
 _HERE = os.path.dirname(os.path.abspath(__file__))
-KOKORO_MODEL_PATH  = os.path.join(_HERE, "kokoro-v1.0.onnx")
-KOKORO_VOICES_PATH = os.path.join(_HERE, "voices-v1.0.bin")
+
+import sys
+def get_asset_path(filename):
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, filename)
+    return os.path.join(_HERE, filename)
+
+KOKORO_MODEL_PATH  = get_asset_path("kokoro-v1.0.onnx")
+KOKORO_VOICES_PATH = get_asset_path("voices-v1.0.bin")
 
 # ----------------------------------------------------------------------
 # Mood -> voice delivery settings
@@ -314,6 +422,69 @@ EDGE_TTS_VOICE_MAP = {
 # or a .env file.  Kokoro is always the automatic fallback.
 TTS_ENGINE: str = os.environ.get("ARIA_TTS_ENGINE", "kokoro").lower()
 
+
+# ----------------------------------------------------------------------
+# C5 — Conversational pace matching
+# ----------------------------------------------------------------------
+
+def set_user_baseline_rate(rate: float | None):
+    """C5: Update the calibrated user speaking rate (words/sec).
+    Called by app_web._post_turn_learning() after pace calibration. None
+    disables pace matching and falls back to pure mood-based pacing.
+    """
+    global _user_baseline_rate
+    _user_baseline_rate = rate
+    if rate is not None:
+        print(f"[voice] C5 user baseline rate updated: {rate:.3f} wps")
+
+
+def _map_user_rate_to_aria_speed(user_wps: float) -> float:
+    """C5: Map a user speaking rate (words/sec) to ARIA's Kokoro speed multiplier.
+
+    Linear interpolation over the measured realistic user speech range:
+      1.0 wps (slow) → ARIA 0.82  (deliberate, soft)
+      2.5 wps (normal) → ARIA 0.92 (ARIA's natural default)
+      4.0 wps (fast) → ARIA 1.05  (slightly brisk)
+
+    Clamped to [0.80, 1.05] so a very fast or very slow user can't push
+    ARIA outside her natural character range.
+    """
+    # Two-segment linear interpolation.
+    if user_wps <= 2.5:
+        # slow end: 1.0 wps → 0.82, 2.5 wps → 0.92
+        t = max(0.0, (user_wps - 1.0) / 1.5)
+        speed = 0.82 + t * (0.92 - 0.82)
+    else:
+        # fast end: 2.5 wps → 0.92, 4.0 wps → 1.05
+        t = min(1.0, (user_wps - 2.5) / 1.5)
+        speed = 0.92 + t * (1.05 - 0.92)
+    return round(max(0.80, min(1.05, speed)), 3)
+
+
+def _compute_pace_adjusted_speed(baseline_user_rate: float | None, mood: str) -> float:
+    """C5: Compute ARIA's Kokoro speed for this turn.
+
+    Mood-based pacing always applies; when a calibrated user baseline exists,
+    it sets ARIA's BASE speed and the mood multiplier is applied ON TOP of it
+    (not instead of it). This preserves the expressive mood differentiation
+    while shifting the overall delivery toward the user's natural pace.
+
+    baseline_user_rate=None: return pure mood-based speed (no calibration yet).
+    """
+    mood_speed = KOKORO_SPEED_MAP.get((mood or "").lower(), KOKORO_SPEED_MAP["default"])
+    if baseline_user_rate is None:
+        return mood_speed  # not calibrated yet — pure mood pacing
+
+    aria_base = _map_user_rate_to_aria_speed(baseline_user_rate)
+    # Apply mood multiplier relative to the default speed so mood differentiation
+    # is preserved proportionally: a calm-adjusted turn is still slower than an
+    # excited one by the same ratio as without calibration.
+    default_speed = KOKORO_SPEED_MAP["default"]  # 0.92
+    mood_ratio = mood_speed / default_speed
+    adjusted = aria_base * mood_ratio
+    return round(max(0.75, min(1.15, adjusted)), 3)
+
+
 # Exaggeration (0 = flat affect, 1 = very dramatic). Tuned per mood so the
 # voice actually sounds different — not just speed-shifted text.
 _CB_EXAGGERATION: dict = {
@@ -358,6 +529,13 @@ MIC_DEBUG: bool = os.environ.get("ARIA_MIC_DEBUG", "1") != "0"
 # Whisper model size. Benchmarked 2026-07-03 on this machine's real audio:
 # tiny.en 0.12s (accuracy degraded) / base.en 0.24s (best accuracy on this
 # quiet mic) / small.en 0.82s. base.en won on BOTH speed and accuracy.
+# NOT downgraded further on battery (unlike TTS — see power_state.py /
+# TTSEngine.speak): base.en is already the lightest option that doesn't
+# measurably hurt accuracy on this mic; dropping to tiny.en would be a real
+# accuracy regression traded for a STT step that's already the cheapest
+# GPU-time component in the pipeline (0.24s vs Chatterbox's multi-second
+# generations). The actual battery-throttle relief comes from the TTS tier
+# skip, not from a Whisper downgrade that wasn't warranted by evidence.
 WHISPER_MODEL: str = os.environ.get("ARIA_WHISPER_MODEL", "base.en")
 
 # Whisper device: "auto" (GPU first), "cuda", or "cpu". Set ARIA_WHISPER_DEVICE=cpu
@@ -377,8 +555,8 @@ CB_TURBO: bool = os.environ.get("ARIA_CHATTERBOX_TURBO", "1") != "0"
 
 # Turbo's prepare_conditionals asserts the reference is > 5s; the classic
 # model accepts the original ~4s clip.
-VOICE_REF_PATH      = os.path.join(_HERE, "aria_voice_reference.wav")
-VOICE_REF_LONG_PATH = os.path.join(_HERE, "aria_voice_reference_long.wav")
+VOICE_REF_PATH      = get_asset_path("aria_voice_reference.wav")
+VOICE_REF_LONG_PATH = get_asset_path("aria_voice_reference_long.wav")
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -422,8 +600,8 @@ VAD_FRAME_BYTES   = VAD_FRAME_SAMPLES * 2                    # int16 mono
 # strictness with a measured 0.7% false-positive rate on her own speaker
 # bleed. A single 90ms streak was also too easy for a click/cough, so both
 # idle and barge-in still require a sustained run (below).
-VAD_AGGRESSIVENESS = int(os.environ.get("ARIA_VAD_AGGR", "2"))              # 0..3, was 3 this session, 2 before
-VAD_START_FRAMES   = int(os.environ.get("ARIA_VAD_START_FRAMES", "12"))     # ~360ms, was 3 (~90ms)
+VAD_AGGRESSIVENESS = int(os.environ.get("ARIA_VAD_AGGR", "3"))              # 0..3, was 3 this session, 2 before
+VAD_START_FRAMES   = int(os.environ.get("ARIA_VAD_START_FRAMES", "15"))     # ~450ms, was 12 (~360ms)
 VAD_END_SILENCE_MS = int(os.environ.get("ARIA_END_SILENCE_MS", "650"))
 VAD_PADDING_MS     = 300  # audio kept from just before speech started
 VAD_MAX_SEGMENT_S  = 20   # hard cap so a noisy room can't grow a segment forever
@@ -435,7 +613,7 @@ VAD_MAX_SEGMENT_S  = 20   # hard cap so a noisy room can't grow a segment foreve
 # This is the layer that catches steady background noise VAD alone misses.
 AMBIENT_CALIBRATION_S  = float(os.environ.get("ARIA_AMBIENT_CALIBRATION_S", "1.5"))
 ENERGY_GATE_MULTIPLIER = float(os.environ.get("ARIA_ENERGY_GATE_MULT", "3.5"))
-ENERGY_GATE_MIN_RMS    = float(os.environ.get("ARIA_ENERGY_GATE_MIN_RMS", "60"))
+ENERGY_GATE_MIN_RMS    = float(os.environ.get("ARIA_ENERGY_GATE_MIN_RMS", "80"))
 # Sanity ceiling: caught live 2026-07-09 — a single transient during the 1.5s
 # calibration window (chair shift, window-open moment) skewed the 75th
 # percentile to 454 RMS, producing a 1590 RMS gate that made ARIA nearly deaf
@@ -444,7 +622,7 @@ ENERGY_GATE_MIN_RMS    = float(os.environ.get("ARIA_ENERGY_GATE_MIN_RMS", "60"))
 # plus this hard ceiling so one bad calibration can never lock out real speech
 # — genuine speech RMS measured throughout this app's testing tops out well
 # under this value on normal (non-shouted) delivery.
-ENERGY_GATE_MAX_RMS    = float(os.environ.get("ARIA_ENERGY_GATE_MAX_RMS", "400"))
+ENERGY_GATE_MAX_RMS    = float(os.environ.get("ARIA_ENERGY_GATE_MAX_RMS", "320"))
 
 # Segments shorter than this after silence-finalization are discarded before
 # ever reaching Whisper — a cough or click can still slip past the frame-level
@@ -495,7 +673,7 @@ class _VadSegmenter:
         # thresholds — barge-in's is deliberately longer (BARGE_START_FRAMES).
         self._start_frames = start_frames if start_frames is not None else VAD_START_FRAMES
         from collections import deque
-        pad_frames = max(1, VAD_PADDING_MS // VAD_FRAME_MS)
+        pad_frames = max(1, VAD_PADDING_MS // VAD_FRAME_MS) + self._start_frames
         self._padding = deque(maxlen=pad_frames)
         self._voiced: list[bytes] = []
         self._in_speech = False
@@ -650,6 +828,11 @@ def _transcribe_audio(recognizer, audio):
             return (text or None), conf
         except Exception as e:
             print(f"[stt] {_ts()} Whisper error: {e} — trying Google STT")
+            
+    if not network_state.is_online():
+        print(f"[stt] {_ts()} Offline mode: skipping Google STT fallback.")
+        return None, {"engine": "none", "avg_logprob": -999.0, "no_speech_prob": 1.0}
+        
     try:
         print(f"[stt] {_ts()} Sending to recognition engine: google")
         text = recognizer.recognize_google(audio)
@@ -667,6 +850,13 @@ def _transcribe_audio(recognizer, audio):
 def _passes_confidence_gate(text: str, conf: dict) -> bool:
     """Post-transcription confidence gate. Whisper results only — Google
     already does its own filtering and carries pass-through confidence."""
+    # Filter known Whisper hallucinations
+    t_clean = re.sub(r'[^a-z]', '', text.strip().lower())
+    hallucinations = {"whoa", "ohh", "function", "amisupportedtosomethinghere", "you"}
+    if t_clean in hallucinations or len(t_clean) < 2:
+        print(f"[stt] {_ts()} Discarded known hallucination/noise: {text!r}")
+        return False
+
     if conf.get("engine") != "whisper":
         return True
     if conf["avg_logprob"] < WHISPER_MIN_AVG_LOGPROB or conf["no_speech_prob"] > WHISPER_MAX_NO_SPEECH_PROB:
@@ -764,15 +954,16 @@ def _segment_worker(seg_queue, callback, wake_word):
     the prime suspect for the "7 of 10 attempts get no response" bug.
     """
     recognizer = sr.Recognizer()   # only used as the Google-STT fallback handle
+    _consecutive_stt_failures = 0
     while not _stop_event.is_set():
         try:
             item = seg_queue.get(timeout=1.0)
         except Exception:
             continue
-        # 3-tuple: (segment, finalized_at, captured_during_aria_speech);
-        # older 2-tuple callers (tests) default the flag to False.
+        # 4-tuple: (segment, finalized_at, captured_during_aria_speech, oww_detected)
         segment, finalized_at = item[0], item[1]
         during_speech = item[2] if len(item) > 2 else False
+        oww_detected = item[3] if len(item) > 3 else False
         try:
             global _turn_t0
             _turn_t0 = finalized_at   # [t=] timeline stays anchored to end-of-speech
@@ -791,10 +982,31 @@ def _segment_worker(seg_queue, callback, wake_word):
                 continue
 
             text, conf = _transcribe_audio(recognizer, audio)
-            if not text:
+            if not text or not _passes_confidence_gate(text, conf):
+                if seg_rms > 0.01:
+                    _consecutive_stt_failures += 1
+                    if _consecutive_stt_failures >= 3:
+                        now = time.time()
+                        if 'last_stt_alert' not in locals():
+                            last_stt_alert = 0
+                        
+                        # Use the module-level variable to persist across iterations
+                        global _last_stt_proactive_alert
+                        try:
+                            _last_stt_proactive_alert
+                        except NameError:
+                            _last_stt_proactive_alert = 0
+
+                        if now - _last_stt_proactive_alert > 300:  # 5 minutes
+                            print(f"[voice] {_ts()} Repeated STT failures in loud environment — triggering chat mode prompt")
+                            callback({"text": "(System diagnostic: The microphone is picking up heavy sustained noise and failing to understand the user. Proactively and briefly offer to switch to text/chat mode. Do not ask for their question.)", "audio_raw": None})
+                            _last_stt_proactive_alert = now
+                        else:
+                            print(f"[voice] {_ts()} STT failure alert suppressed by 5-minute cooldown.")
+                        _consecutive_stt_failures = 0
                 continue
-            if not _passes_confidence_gate(text, conf):
-                continue
+            
+            _consecutive_stt_failures = 0
 
             # Echo window: a segment carrying HER voice can finalize up to
             # ~1.5s AFTER playback stops (the 600ms silence tail flips the
@@ -812,7 +1024,12 @@ def _segment_worker(seg_queue, callback, wake_word):
                 continue
 
             matched, command = _find_wake(text, wake_word)
-            print(f"[voice] {_ts()} Wake word check on: {text!r} → "
+            if oww_detected and not matched:
+                print(f"[voice] {_ts()} openWakeWord triggered but STT missed wake word. Forcing wake.")
+                matched = True
+                command = text
+                
+            print(f"[voice] {_ts()} Wake word check on: {text!r} — "
                   f"matched={matched} (required={_wake_required})")
             if _wake_required and not matched:
                 continue
@@ -849,6 +1066,16 @@ def _listen_continuous_impl(callback, wake_word="aria"):
     import webrtcvad
 
     _stop_event.clear()
+    try:
+        from openwakeword.model import Model
+        print(f"[voice] Initializing openWakeWord model...")
+        oww_model = Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
+    except Exception as e:
+        print(f"[voice] Failed to initialize openWakeWord: {e}")
+        oww_model = None
+        
+    oww_detected_this_segment = False
+    
     vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
     segmenter = _VadSegmenter(vad, start_frames=VAD_START_FRAMES)   # idle listening
     seg_queue: "_queue.Queue" = _queue.Queue()
@@ -858,6 +1085,8 @@ def _listen_continuous_impl(callback, wake_word="aria"):
                      daemon=True).start()
     # Warm Whisper in parallel so the first utterance transcribes fast.
     threading.Thread(target=_get_whisper, daemon=True).start()
+    # Safety net: recover automatically if THINKING/SPEAKING ever gets stuck.
+    threading.Thread(target=_state_watchdog_loop, daemon=True).start()
 
     try:
         dev = sd.query_devices(kind="input")
@@ -937,6 +1166,14 @@ def _listen_continuous_impl(callback, wake_word="aria"):
                 rms = _frame_rms(frame)
                 now = time.time()
 
+                if oww_model and prev_state != "SPEAKING":
+                    frame_np = np.frombuffer(frame, dtype=np.int16)
+                    prediction = oww_model.predict(frame_np)
+                    if prediction and any(score > 0.5 for score in prediction.values()):
+                        if not oww_detected_this_segment:
+                            print(f"[voice] {_ts()} openWakeWord triggered!")
+                            oww_detected_this_segment = True
+
                 # live UI level + optional debug print
                 with _mic_state_lock:
                     _mic_state["level"] = min(1.0, rms / 8192.0)
@@ -1003,7 +1240,8 @@ def _listen_continuous_impl(callback, wake_word="aria"):
                         streak_start = time.time() - (BARGE_START_FRAMES * VAD_FRAME_MS / 1000.0)
                         handle_barge_in(streak_start)
                     if segment is not None:
-                        seg_queue.put((segment, time.time(), True))  # True: captured during her speech
+                        seg_queue.put((segment, time.time(), True, oww_detected_this_segment))
+                        oww_detected_this_segment = False
                     continue
 
                 # ── Layer 1 (amplitude) + Layer 2 (spectral/VAD) combined ──
@@ -1017,7 +1255,8 @@ def _listen_continuous_impl(callback, wake_word="aria"):
                 is_speech = raw_speech and rms >= energy_gate_rms
                 segment = segmenter.feed(frame, speech_override=is_speech)
                 if segment is not None:
-                    seg_queue.put((segment, time.time(), False))
+                    seg_queue.put((segment, time.time(), False, oww_detected_this_segment))
+                    oww_detected_this_segment = False
 
     except Exception as e:
         print(f"[voice] Microphone stream error: {e} — listener stopped")
@@ -1251,8 +1490,8 @@ class KokoroEngine:
         self._kokoro = None
         self._load_lock = threading.Lock()
         self.available = False
-        # Pre-load in background so first speak() is immediate.
-        threading.Thread(target=self._load, daemon=True).start()
+        # Load synchronously so it's instantly available for the startup greeting.
+        self._load()
 
     def _load(self):
         if not (os.path.exists(KOKORO_MODEL_PATH) and os.path.exists(KOKORO_VOICES_PATH)):
@@ -1272,30 +1511,38 @@ class KokoroEngine:
         """Synthesise and play text. Blocks until playback finishes. Returns True on success."""
         if not self.available or self._kokoro is None:
             return False
+            
+        # Strip bracketed emotion tags so Kokoro doesn't read them aloud
+        tag_cleaner = re.compile(r'\[(chuckle|laugh|sigh|cough|gasp|sniff|clear throat|sush|groan)\]', re.IGNORECASE)
+        text = tag_cleaner.sub('', text).strip()
+        
+        if not text:
+            return True # Nothing left to say after stripping tags
+            
         try:
             import sounddevice as sd
-            voice = KOKORO_VOICE_MAP.get(mood, KOKORO_VOICE_MAP["default"])
-            speed = KOKORO_SPEED_MAP.get(mood, KOKORO_SPEED_MAP["default"])
+            voice_name = KOKORO_VOICE_MAP.get(mood, KOKORO_VOICE_MAP["default"])
+            # C5: use pace-adjusted speed (user baseline + mood ratio) rather
+            # than a fixed per-mood lookup. Falls back to pure mood pacing
+            # when no baseline has been calibrated yet.
+            speed = _compute_pace_adjusted_speed(_user_baseline_rate, mood)
             turn_log("TTS (Kokoro) generation started")
             t0 = time.time()
             epoch = _speak_epoch
             global _generation_active
             _generation_active = True
             try:
-                samples, sample_rate = self._kokoro.create(text, voice=voice, speed=speed, lang="en-us")
+                samples, sample_rate = self._kokoro.create(text, voice=voice_name, speed=speed, lang="en-us")
+
             finally:
                 _generation_active = False
             turn_log(f"TTS (Kokoro) generation FINISHED (audio ready, took {time.time()-t0:.2f}s)")
             if epoch != _speak_epoch:
                 turn_log("TTS (Kokoro) generated after barge-in — discarded")
                 return True
-            try:
-                _set_speaking(True)
-                turn_log("Audio playback actually started")
-                sd.play(samples, samplerate=sample_rate)
-                sd.wait()
-            finally:
-                _set_speaking(False)
+            _playback_queue.put((samples, sample_rate, epoch))
+            _playback_queue.put((None, None, epoch))
+            turn_log("Audio playback chunk enqueued to background worker")
             return True
         except Exception as e:
             print(f"[voice:kokoro] speak() failed: {e}")
@@ -1438,24 +1685,21 @@ class ChatterboxEngine:
                     audio = wav.squeeze(0).cpu().numpy()
                     if i == 0:
                         turn_log(f"TTS ({variant}) first chunk ready (took {time.time()-t0:.2f}s)")
-                    if playing:
-                        sd.wait()  # let the previous chunk finish before queuing this one
                     # Generation of this chunk may have outlived a barge-in:
                     # a stale epoch means this clip must never reach the speakers.
                     if epoch != _speak_epoch:
                         turn_log(f"TTS ({variant}) chunk {i+1} generated after barge-in — discarded")
                         return True
-                    _set_speaking(True)
+                        
+                    _playback_queue.put((audio, self._model.sr, epoch))
                     if i == 0:
-                        turn_log("Audio playback actually started")
-                    sd.play(audio, samplerate=self._model.sr)
-                    playing = True
-                sd.wait()
+                        turn_log("Audio playback chunk enqueued to background worker")
+                        
+                _playback_queue.put((None, None, epoch))
                 if epoch == _speak_epoch:
-                    turn_log(f"TTS ({variant}) all chunks done (total {time.time()-t0:.2f}s)")
+                    turn_log(f"TTS ({variant}) all chunks enqueued (total {time.time()-t0:.2f}s)")
             finally:
                 _generation_active = False
-                _set_speaking(False)
             self._oom_strikes = 0
             return True
         except Exception as e:
@@ -1548,12 +1792,19 @@ class TTSEngine:
         if not text or not text.strip():
             return
 
-        # Tier 1 (chatterbox mode only): expressive GPU synthesis
-        if self.chatterbox is not None and self.chatterbox.available:
+        # Check network state: Chatterbox Turbo is used when ONLINE and on AC power.
+        # Fallback to Kokoro when OFFLINE or on battery.
+        is_online = network_state.is_online()
+        on_battery = power_state.is_on_battery()
+        
+        if self.chatterbox is not None and self.chatterbox.available and is_online and not on_battery:
             if self.chatterbox.speak(text, mood):
                 return
+        elif self.chatterbox is not None and self.chatterbox.available:
+            reason = "offline" if not is_online else "on battery"
+            print(f"[voice] {reason} — using Kokoro instead of Chatterbox for this reply.")
 
-        # Tier 2 (or 1 in kokoro mode): Kokoro offline ONNX
+        # Tier 2 (Offline or on battery): Kokoro offline ONNX
         if self.kokoro.available:
             if self.kokoro.speak(text, mood):
                 return
@@ -1629,6 +1880,92 @@ _tts_engine_lock = threading.Lock()
 # concurrent sounddevice plays cut each other off mid-word.
 _speak_lock = threading.Lock()
 
+_playback_queue = queue.Queue()
+
+def _playback_worker():
+    import sounddevice as sd
+    import numpy as np
+    
+    current_stream = None
+    current_sr = None
+    last_played_epoch = -1
+    
+    while True:
+        try:
+            item = _playback_queue.get()
+            if item is None:
+                break
+                
+            audio_array, sr, epoch = item
+            
+            # End of utterance marker
+            if audio_array is None:
+                if epoch == _speak_epoch:
+                    _set_speaking(False)
+                _playback_queue.task_done()
+                continue
+                
+            if epoch != _speak_epoch:
+                _playback_queue.task_done()
+                continue
+                
+            is_new_epoch = (epoch != last_played_epoch)
+            buffer = [audio_array]
+            total_samples = len(audio_array)
+            
+            # Pre-buffer 200ms if it's the start of a new epoch
+            if is_new_epoch:
+                _set_speaking(True)
+                target_samples = int(sr * 0.200)
+                while total_samples < target_samples:
+                    try:
+                        next_item = _playback_queue.get(timeout=0.05)
+                        if next_item is None:
+                            _playback_queue.put(None)
+                            break
+                        n_audio, n_sr, n_epoch = next_item
+                        if n_audio is None:
+                            _playback_queue.put(next_item)
+                            break
+                        if n_epoch != epoch or n_epoch != _speak_epoch:
+                            _playback_queue.task_done()
+                            break
+                        buffer.append(n_audio)
+                        total_samples += len(n_audio)
+                    except queue.Empty:
+                        break
+                        
+            audio_array = np.concatenate(buffer)
+            
+            if is_new_epoch:
+                silence_padding = np.zeros(int(sr * 0.15), dtype=np.float32)
+                audio_array = np.concatenate([silence_padding, audio_array])
+                
+                fade_samples = int(sr * 0.010)
+                pad_samples = len(silence_padding)
+                if len(audio_array) > pad_samples + fade_samples:
+                    fade_in = np.linspace(0, 1, fade_samples, dtype=np.float32)
+                    audio_array[pad_samples:pad_samples+fade_samples] *= fade_in
+                last_played_epoch = epoch
+                
+            if current_stream is None or current_sr != sr:
+                if current_stream is not None:
+                    current_stream.stop()
+                    current_stream.close()
+                current_stream = sd.OutputStream(samplerate=sr, channels=1, dtype='float32')
+                current_stream.start()
+                current_sr = sr
+                
+            current_stream.write(audio_array)
+            
+            for _ in range(len(buffer)):
+                _playback_queue.task_done()
+                
+        except Exception as e:
+            print(f"[playback_worker] error: {e}")
+
+threading.Thread(target=_playback_worker, daemon=True).start()
+
 
 def _get_tts_engine() -> TTSEngine:
     global _tts_engine
@@ -1647,32 +1984,118 @@ def init_tts():
     _get_tts_engine()
 
 
-def speak(text, mood="calm", language="en"):
-    """Speak text aloud. Never raises."""
+import unicodedata
+
+def speak_safe(text, mood="calm", language="en"):
+    """Speak text aloud via tiered pipeline. Never raises."""
+    text = clean_for_tts(text)
     if not text or not text.strip():
         return
     print(f"[voice] Speaking ({mood}, {language}): {text[:60]}{'...' if len(text) > 60 else ''}")
+    
+    global _speak_epoch
+    if _tts_speaking or _generation_active:
+        _speak_epoch += 1
+        stop_playback()
+        turn_log("Superseded previous response (newest reply wins)")
+        
+    _set_current_speech(text)   # so the mic can recognise her own words as echo
+    t_lock = time.time()
+    
     try:
-        # Newest reply wins: if a previous response is still playing or
-        # generating, abandon it rather than queueing behind it — live logs
-        # showed replies waiting 17-25s on the speak lock, answering
-        # questions the user had already moved past.
-        global _speak_epoch
-        if _tts_speaking or _generation_active:
-            _speak_epoch += 1
-            stop_playback()
-            turn_log("Superseded previous response (newest reply wins)")
-        _set_current_speech(text)   # so the mic can recognise her own words as echo
-        t_lock = time.time()
         with _speak_lock:
             waited = time.time() - t_lock
             if waited > 0.05:
                 turn_log(f"Waited {waited:.2f}s for previous speech to finish (speak lock)")
-            _get_tts_engine().speak(text, mood)
+                
+            engine = _get_tts_engine()
+            
+            # 1. Primary Engine (Chatterbox)
+            try:
+                # Sanitize text for UTF-8 compatibility
+                utf8_text = text.encode('utf-8', 'ignore').decode('utf-8')
+                if engine.chatterbox and engine.chatterbox.available:
+                    if engine.chatterbox.speak(utf8_text, mood):
+                        return
+            except Exception as e:
+                print(f"[voice] Chatterbox fallback triggered due to: {e}")
+                
+            # 2. Fallback Engine (Kokoro)
+            try:
+                if engine.kokoro and engine.kokoro.available:
+                    # Unicode normalization to prevent phonemizer C-level crashes
+                    normalized_text = "".join(
+                        c for c in unicodedata.normalize("NFD", text)
+                        if unicodedata.category(c) != "Mn"
+                    )
+                    if engine.kokoro.speak(normalized_text, mood):
+                        return
+            except Exception as e:
+                print(f"[Voice Error] Kokoro fallback failed: {e}")
+                
+            # 3. Graceful Degradation / Silent Log
+            print("[voice] All TTS engines failed or unavailable. Silent log triggered.")
+            
     except Exception as e:
-        print(f"[voice] speak() failed entirely: {e}")
+        print(f"[voice] speak_safe() failed entirely: {e}")
     finally:
         _set_speaking(False)  # never leave the UI thinking we're still talking
+
+def _dispatch_speech(text: str, mood: str = "calm"):
+    """
+    Dynamically route speech based on network availability.
+    ONLINE: ChatterboxTurboTTS (or edge-tts).
+    OFFLINE (or on battery): Kokoro-82M.
+    """
+    engine = _get_tts_engine()
+    engine.speak(text, mood)
+
+def stream_tokens_to_voice(token_generator, mood="calm", language="en"):
+    """
+    Receives a generator of tokens (e.g., from local LLM).
+    Accumulates tokens and splits on sentence boundaries.
+    Synthesizes and speaks complete clauses immediately to minimize Time-To-First-Audio.
+    """
+    global _speak_epoch
+    if _tts_speaking or _generation_active:
+        _speak_epoch += 1
+        stop_playback()
+        
+    def process_sentence(sentence):
+        sentence = clean_for_tts(sentence)
+        if not sentence.strip(): return
+        print(f"[voice] Streaming clause: {sentence}")
+        # Note: bypassing the outer speak() wrapper to prevent cancellation logic 
+        # from killing our own pipelined chunks. We manage the lock directly.
+        _set_current_speech(sentence)
+        t_lock = time.time()
+        with _speak_lock:
+            waited = time.time() - t_lock
+            if waited > 0.05:
+                turn_log(f"Waited {waited:.2f}s for previous chunk to finish")
+            if not _tts_speaking:
+                _set_speaking(True)
+            _dispatch_speech(sentence, mood)
+            
+    try:
+        buffer = ""
+        for token in token_generator:
+            buffer += token
+            # Check for sentence boundary: ., !, ?, or newline followed by space or end
+            match = re.search(r'([.!?\n])(\s+|$)', buffer)
+            if match:
+                split_idx = match.end()
+                sentence = buffer[:split_idx].strip()
+                if sentence:
+                    process_sentence(sentence)
+                buffer = buffer[split_idx:]
+                
+        if buffer.strip():
+            process_sentence(buffer.strip())
+    except Exception as e:
+        print(f"[voice] stream_tokens_to_voice failed: {e}")
+    finally:
+        _set_speaking(False)
 
 
 def shutdown_tts():

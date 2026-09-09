@@ -1,9 +1,12 @@
 """
 ARIA Desktop - Face Module
 Real-time webcam analysis: facial emotion (DeepFace), fatigue (Eye Aspect
-Ratio + blink rate via MediaPipe), engagement (head pose via solvePnP), and
-a fused face mood signal. Runs entirely in a background daemon thread so the
-UI never blocks on camera I/O or model inference.
+Ratio + blink rate via MediaPipe), engagement (head pose via solvePnP), a
+fused face mood signal, and periodic face-based identity verification
+(DeepFace.verify() against a one-time-enrolled reference image) so ARIA can
+tell whether it's actually talking to its registered user. Runs entirely in
+a background daemon thread so the UI never blocks on camera I/O or model
+inference.
 """
 
 import math
@@ -38,6 +41,26 @@ EMOTION_MIN_INTERVAL_S = 2.5  # DeepFace (full TF inference) at most every 2.5s 
                               # mood detection doesn't need to be frame-perfect, and
                               # every inference competes with Chatterbox for the GPU/CPU
 EMOTION_CONFIDENCE_THRESHOLD = 0.4  # below this, keep the previous emotion rather than flapping
+
+IDENTITY_VERIFY_INTERVAL_S = 45  # how often to re-check speaker identity — DeepFace.verify()
+                                  # is a full inference pass, no need to run it every frame
+ENROLLED_FACES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "enrolled_faces")
+
+# SFace's own stock cosine threshold (~0.593) rejected the real registered
+# user repeatedly in live use. A first widen to 0.80 (based on 5 early
+# samples) still wasn't enough — a longer 19-check live session showed real
+# matches spread as wide as 0.5153-0.7646 and mismatches as low as 0.8171,
+# i.e. real variance this webcam/lighting setup produces for the SAME person,
+# not just a slightly-wrong cutoff. 0.90 absorbs that observed spread with
+# roughly a tenth still held in reserve, while the enrolled reference is
+# ALSO being redone with a clean, direct, well-lit shot (a poor original
+# enrollment photo would explain why every comparison ran high) — the two
+# fixes are meant to compound, not substitute for each other. This is a
+# false-reject vs false-accept tradeoff: for this personal, single-user,
+# non-security app, repeatedly telling the real user "I don't recognize you"
+# is strictly worse than being lenient — matches the fail-open philosophy
+# used everywhere else in this feature (see _verify_identity).
+IDENTITY_MATCH_THRESHOLD = 0.90
 
 # This mediapipe build only ships the new Tasks API (no legacy mp.solutions),
 # which requires a downloadable .task model file for face landmark detection.
@@ -105,7 +128,8 @@ class FaceAnalyzer:
         self.camera_available = False
 
         self.frame_count = 0
-        self.latest_frame = None  # annotated PIL.Image, set under self.lock
+        self.latest_frame = None      # annotated PIL.Image, set under self.lock
+        self._latest_raw_frame = None  # raw BGR ndarray, set under self.lock (needed for enroll())
         self._last_emotion_time = 0.0
 
         self.latest_emotion = "neutral"
@@ -120,6 +144,26 @@ class FaceAnalyzer:
         self.closed_start_time = None
         self.blink_timestamps = deque()
         self.fatigue_ema = 0.0
+
+        # Identity verification state. Fail-open by default (True) — this is
+        # a personal single-user desktop app, not a security product, so the
+        # absence of a check (no enrollment yet, camera off, a verification
+        # error) must never itself block normal use.
+        self._enrolled_path = None
+        self._last_identity_check_time = 0.0
+        self.speaker_verified = True
+        self.verification_distance = None
+        # Hysteresis over the raw per-check reads: a single noisy misread
+        # must not flip speaker_verified — that flag gates whether the LLM
+        # prompt gets RECENT CONVERSATION HISTORY at all, so one bad frame
+        # was observed live to make ARIA appear to "forget" a conversation
+        # from moments earlier. Real data showed genuine matches for the
+        # SAME person spread from 0.16 to 1.02 distance in one session — the
+        # signal itself is noisy, not just mis-thresholded. Only 2
+        # CONSECUTIVE raw mismatches flip the effective state to unverified;
+        # a single subsequent match restores it immediately (asymmetric on
+        # purpose — false-reject is the worse failure mode here).
+        self._recent_identity_matches = deque(maxlen=2)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -179,6 +223,7 @@ class FaceAnalyzer:
                 self.face_landmarker.close()
             except Exception:
                 pass
+            del self.face_landmarker
             self.face_landmarker = None  # start() recreates it fresh
         print("[face] Camera stopped")
 
@@ -233,6 +278,17 @@ class FaceAnalyzer:
                     self.latest_fatigue = fatigue
                 if engagement is not None:
                     self.latest_engagement = engagement
+                self._latest_raw_frame = frame
+
+            # Identity verification: only worth attempting when a face is
+            # actually present this cycle (skips wasted DeepFace calls on
+            # empty frames) and an enrollment reference exists. Time-gated
+            # like emotion analysis — a full DeepFace.verify() pass every
+            # frame would be wasteful for a signal that only needs checking
+            # every 30-60s.
+            if landmarks and self._enrolled_path and (now - self._last_identity_check_time >= IDENTITY_VERIFY_INTERVAL_S):
+                self._last_identity_check_time = now
+                self._verify_identity(frame)
 
             annotated = self.draw_overlay(frame, self.latest_emotion, self.latest_fatigue, self.latest_engagement)
             pil_image = Image.fromarray(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB))
@@ -259,6 +315,8 @@ class FaceAnalyzer:
             fatigue = self.latest_fatigue
             engagement = self.latest_engagement
             face_detected = self.face_detected
+            speaker_verified = self.speaker_verified
+            verification_distance = self.verification_distance
         return {
             "emotion": emotion,
             "confidence": confidence,
@@ -266,7 +324,99 @@ class FaceAnalyzer:
             "engagement": engagement,
             "fused_mood": self.get_fused_face_mood(emotion, fatigue, engagement),
             "face_detected": face_detected,
+            "speaker_verified": speaker_verified,
+            "verification_distance": verification_distance,
         }
+
+    # ------------------------------------------------------------------
+    # Identity verification
+    # ------------------------------------------------------------------
+
+    def set_enrollment_path(self, path):
+        """Point verification at an existing enrolled reference image, if one
+        exists on disk. No-op (stays fail-open/unenrolled) if it doesn't."""
+        if path and os.path.exists(path):
+            self._enrolled_path = path
+            print(f"[identity] Using existing enrollment: {path}")
+        else:
+            print(f"[identity] No enrolled face on file at {path} — "
+                  f"verification stays fail-open until enroll() succeeds")
+
+    def enroll(self, save_path, timeout_s=30):
+        """
+        Capture and save a reference face image for future identity
+        verification. Waits up to timeout_s for a confidently-detected face
+        from the live camera feed (requires start() to already be running).
+        Returns True on success, False if no face was found in time — in
+        either case, verification remains fail-open (speaker_verified stays
+        True) until a successful enrollment exists, consistent with this
+        being a personal convenience feature, not a security gate.
+        """
+        print("[identity] Enrolling reference face — please look at the camera...")
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            with self.lock:
+                frame = self._latest_raw_frame
+                detected = self.face_detected
+            if frame is not None and detected:
+                try:
+                    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                    cv2.imwrite(save_path, frame)
+                    self._enrolled_path = save_path
+                    print(f"[identity] Enrollment saved: {save_path}")
+                    return True
+                except Exception as e:
+                    print(f"[identity] Failed to save enrollment image: {e}")
+                    return False
+            time.sleep(0.3)
+        print(f"[identity] Enrollment failed — no face detected within {timeout_s}s. "
+              f"Verification will stay fail-open (always verified) until enrolled "
+              f"(re-run enrollment, or delete/replace the file at the expected path to retry).")
+        return False
+
+    def _verify_identity(self, frame):
+        """
+        Compare the current frame against the enrolled reference via
+        DeepFace.verify(). model_name="SFace" (~5MB weights, vs DeepFace's
+        default VGG-Face at ~580MB) — chosen after a live run showed VGG-
+        Face's download taking 14+ hours on this network; SFace is still a
+        real, purpose-built face-recognition model, just far more practical
+        to fetch. The match decision uses IDENTITY_MATCH_THRESHOLD against
+        the raw `distance`, NOT DeepFace's own `verified` field — the stock
+        threshold measurably rejected the real user too often in live use
+        (see IDENTITY_MATCH_THRESHOLD's comment for the real numbers).
+        Fails open (stays verified) on any error — e.g. a transient decode
+        issue must not lock the real user out. The EFFECTIVE speaker_verified
+        exposed to the rest of the app applies hysteresis over these raw
+        reads (see _recent_identity_matches in __init__) — a single mismatch
+        does not flip it.
+        """
+        try:
+            from deepface import DeepFace
+            result = DeepFace.verify(
+                img1_path=self._enrolled_path, img2_path=frame,
+                model_name="SFace", enforce_detection=False,
+                detector_backend="opencv", silent=True,
+            )
+            distance = result.get("distance")
+            raw_match = isinstance(distance, (int, float)) and distance <= IDENTITY_MATCH_THRESHOLD
+            dist_str = f"{distance:.4f}" if isinstance(distance, (int, float)) else "None"
+        except Exception as e:
+            print(f"[identity] verification failed ({e}) — defaulting to verified (fail-open)")
+            raw_match = True
+            distance = None
+            dist_str = "None"
+
+        with self.lock:
+            self._recent_identity_matches.append(raw_match)
+            # Unverified only once we HAVE 2 recent reads AND both missed —
+            # any match in the last 2 keeps (or restores) verified status.
+            effective = (len(self._recent_identity_matches) < 2
+                         or any(self._recent_identity_matches))
+            self.speaker_verified = effective
+            self.verification_distance = distance
+        print(f"[identity] Match={raw_match} (effective={effective}), distance={dist_str} "
+              f"(threshold={IDENTITY_MATCH_THRESHOLD})")
 
     # ------------------------------------------------------------------
     # Emotion

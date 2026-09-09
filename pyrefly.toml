@@ -1,0 +1,14 @@
+# Pyrefly type checker configuration
+# https://github.com/facebook/pyrefly
+
+[project_includes]
+# Only check project files, not the venv
+path = ["."]
+
+[python]
+interpreter = ".venv/Scripts/python.exe"
+version = "3.13"
+
+[ignore]
+# Ignore missing stubs for packages that work fine at runtime
+missing_stubs = true

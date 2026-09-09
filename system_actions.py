@@ -131,6 +131,27 @@ _APP_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
+def match_app_from_text(text: str) -> str | None:
+    """
+    Best-effort LOCAL match of "open <app>" phrasing to a real, available
+    app, using the same alias table as target_was_requested. Used by
+    offline_router.py to trigger app-opening without Groq — deliberately
+    narrow (requires the word "open") so it doesn't accidentally fire on
+    unrelated sentences that happen to mention an app name in passing.
+    Returns the app key, or None if nothing matched.
+    """
+    lowered = (text or "").lower()
+    if "open" not in lowered:
+        return None
+    for app in _APPS:
+        aliases = _APP_ALIASES.get(app, ()) or (app.replace("_", " "),)
+        if app not in _APP_ALIASES:
+            aliases = (app.replace("_", " "), app)
+        if any(a in lowered for a in aliases):
+            return app
+    return None
+
+
 def target_was_requested(verb: str, target: str, user_message: str) -> bool:
     """
     Deterministic guard against LLM substitution: when refusing an app it can't

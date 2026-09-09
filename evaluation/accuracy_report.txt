@@ -3,34 +3,54 @@ Evaluating user: Sam (id=1)
 ==================================================================
 MOOD ACCURACY vs GROUND TRUTH (self-reported labels)
 ==================================================================
-Labeled samples: 0
-NO GROUND-TRUTH LABELS EXIST YET.
-Recommendation: collect at least 30 labels (>=3 per mood class you
-want to report) before presenting accuracy numbers in a defense.
-Labels accrue via the every-7th-turn check-in, or say 'label <mood>'
-after any exchange.
+Labeled samples: 1
+CAUTION: 1 labels is too few for stable statistics — numbers below
+are directional only. Recommend >=30 labels (>=3 per class).
+
+Accuracy vs the SAME ground truth (honest per-modality comparison):
+  fused         0.0%
+  voice-only  100.0%
+  face-only     0.0%
+  text-only     0.0%
+
+Confusion matrix (fused vs ground truth) — rows=actual, cols=predicted:
+           calm   happy
+    calm       0       1
+   happy       0       0
+
+              precision    recall  f1-score   support
+
+        calm       0.00      0.00      0.00       1.0
+       happy       0.00      0.00      0.00       0.0
+
+    accuracy                           0.00       1.0
+   macro avg       0.00      0.00      0.00       1.0
+weighted avg       0.00      0.00      0.00       1.0
+
+saved C:\Users\PC\Desktop\aria-desktop\evaluation\confusion_matrix.png
 
 ==================================================================
 LEARNING CURVE — prequential KNN accuracy per retrain cycle
 ==================================================================
-Acoustic voice-turns available (chronological): 12
-Final prequential KNN accuracy: 57.1% over 7 predictions
+Acoustic voice-turns available (chronological): 84
+Final prequential KNN accuracy: 53.2% over 79 predictions
 Rule-based reference:           8.3%
 saved C:\Users\PC\Desktop\aria-desktop\evaluation\learning_curve.png
 
 ==================================================================
 ADAPTATION LEDGER SUMMARY
 ==================================================================
-Total adaptation events: 39
-  greeting_personalised          23
-  proactive_suggestion           12
-  knn_retrained                   3
-  knn_mood_used                   1
+Total adaptation events: 254
+  knn_mood_used                  74
+  knn_retrained                  64
+  proactive_suggestion           57
+  greeting_personalised          53
+  personalized_suggestion         6
 saved C:\Users\PC\Desktop\aria-desktop\evaluation\adaptation_summary.md
 
 ==================================================================
 PATTERN GROWTH OVER TIME
 ==================================================================
-Conversations on record: 44
-Distinct patterns reconstructed: 22
+Conversations on record: 145
+Distinct patterns reconstructed: 37
 saved C:\Users\PC\Desktop\aria-desktop\evaluation\pattern_growth.png

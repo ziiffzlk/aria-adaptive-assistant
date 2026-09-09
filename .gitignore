@@ -4,6 +4,9 @@
 # Personal runtime data — conversation history, learned patterns, mood readings
 aria.db
 
+# Enrolled face reference images — biometric data, never committed
+enrolled_faces/
+
 # Python
 __pycache__/
 *.pyc
