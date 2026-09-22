@@ -28,12 +28,16 @@ Computer Science project.
   timing patterns from real conversation history, and uses them to
   personalize suggestions (e.g. YouTube recommendations tied to actual
   tracked interests, not generic content).
+- **System & Environment Awareness** — actively monitors local PC state 
+  (power supply, GPU constraints, network availability) via background daemons
+  and intelligently routes requests to offline models or adjusts processing loads.
 - **Action-oriented, mood-aware responses** — ARIA's replies change what she
   offers to do based on detected mood and known interests, not only her tone
-  of voice.
+  of voice. Includes native system actions (launching apps, managing windows).
+- **Advanced UI & Math Rendering** — fully responsive, open-canvas editorial typography interface with robust Markdown parsing and KaTeX LaTeX rendering for complex technical conversations.
 - **Local + cloud hybrid** — conversational responses via the Groq API
   (Llama models); speech-to-text, text-to-speech, and face/mood analysis all
-  run locally.
+  run locally. Includes intelligent fallback to local LLMs (Qwen) when offline.
 - **Academic evaluation suite** — scripts to measure real accuracy,
   confusion matrices, per-modality comparison, and learning-curve
   improvement against the user's actual database, for defensible reporting
