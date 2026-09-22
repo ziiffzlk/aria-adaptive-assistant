@@ -28,6 +28,7 @@ Computer Science project.
   timing patterns from real conversation history, and uses them to
   personalize suggestions (e.g. YouTube recommendations tied to actual
   tracked interests, not generic content).
+- **Adaptive Logic & Reasoning Core** — a newly engineered central reasoning engine (`fusion.py`) that synthesizes long-term memory, real-time contextual data, and multimodal inputs to execute complex, multi-step reasoning before responding.
 - **System & Environment Awareness** — actively monitors local PC state 
   (power supply, GPU constraints, network availability) via background daemons
   and intelligently routes requests to offline models or adjusts processing loads.
